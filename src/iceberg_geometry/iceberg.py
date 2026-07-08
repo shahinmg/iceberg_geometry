@@ -101,7 +101,112 @@ class Iceberg:
     RHO_WATER = const.RHO_SEAWATER
     STABILITY_THRESHOLD = const.STABILITY_THRESHOLD_WH
     DEFAULT_LW_RATIO = const.DEFAULT_LENGTH_TO_WIDTH_RATIO
-    
+
+    # Metadata attached to every variable/coordinate in the datasets returned by
+    # barker_carea() and init_iceberg_size(). Keyed by variable name; each entry
+    # follows CF-style conventions (long_name, units, description).
+    VARIABLE_ATTRS = {
+        # Coordinate
+        "Z": {
+            "long_name": "Depth below waterline",
+            "units": "m",
+            "positive": "down",
+            "description": "Depth of the bottom of each vertical layer below the waterline.",
+        },
+        # Depth-resolved (per-layer) variables from barker_carea()
+        "depth": {
+            "long_name": "Layer depth below waterline",
+            "units": "m",
+            "description": "Depth coordinate value at each underwater layer.",
+        },
+        "cross_area": {
+            "long_name": "Underwater cross-sectional area",
+            "units": "m2",
+            "description": "Horizontal cross-sectional area of the iceberg at each depth "
+                           "layer (Barker et al. 2004 for keel <= 200 m; tabular below).",
+        },
+        "uwL": {
+            "long_name": "Underwater length",
+            "units": "m",
+            "description": "Iceberg length at each depth layer.",
+        },
+        "uwW": {
+            "long_name": "Underwater width",
+            "units": "m",
+            "description": "Iceberg width at each depth layer, from underwater length "
+                           "divided by the length-to-width ratio.",
+        },
+        "uwV": {
+            "long_name": "Underwater layer volume",
+            "units": "m3",
+            "description": "Volume of the iceberg contained in each depth layer "
+                           "(length * width * layer thickness).",
+        },
+        # Scalar summary variables added by init_iceberg_size()
+        "totalV": {
+            "long_name": "Total iceberg volume",
+            "units": "m3",
+            "description": "Total iceberg volume, underwater plus above-water (sail).",
+        },
+        "sailV": {
+            "long_name": "Sail (above-water) volume",
+            "units": "m3",
+            "description": "Above-water (sail) volume of the iceberg.",
+        },
+        "W": {
+            "long_name": "Waterline width",
+            "units": "m",
+            "description": "Iceberg width at the waterline.",
+        },
+        "freeB": {
+            "long_name": "Freeboard height",
+            "units": "m",
+            "description": "Height of the iceberg above the waterline.",
+        },
+        "L": {
+            "long_name": "Waterline length",
+            "units": "m",
+            "description": "Iceberg length at the waterline.",
+        },
+        "keel": {
+            "long_name": "Keel depth",
+            "units": "m",
+            "description": "Depth of the deepest part of the iceberg below the waterline.",
+        },
+        "TH": {
+            "long_name": "Total thickness",
+            "units": "m",
+            "description": "Total iceberg height, keel depth plus freeboard.",
+        },
+        "keeli": {
+            "long_name": "Deepest layer index",
+            "units": "1",
+            "description": "Index of the deepest iceberg layer (keel depth / dz, rounded up).",
+        },
+        "dz": {
+            "long_name": "Layer thickness",
+            "units": "m",
+            "description": "Vertical layer thickness used for depth discretization.",
+        },
+        "dzk": {
+            "long_name": "Keel partial-layer thickness",
+            "units": "m",
+            "description": "Thickness of the partial layer at the keel.",
+        },
+    }
+
+    def _assign_variable_attrs(self, ds):
+        """Attach descriptive attrs (long_name, units, description) to a dataset.
+
+        Applies :attr:`VARIABLE_ATTRS` to any matching data variable or
+        coordinate present in ``ds`` and returns the same dataset.
+        """
+        for name, attrs in self.VARIABLE_ATTRS.items():
+            if name in ds.variables:
+                ds[name].attrs.update(attrs)
+        return ds
+
+
     def __init__(self, length=None, dz=5):
         """
         Initialize an Iceberg instance.
@@ -557,8 +662,8 @@ class Iceberg:
                                          'uwV':volume},
                               coords = {'Z': z_coord_flat}
                               )
-    
-        
+
+        icebergs = self._assign_variable_attrs(icebergs)
         return icebergs
     
     def init_iceberg_size(self, stability_method='equal', quiet=True):
@@ -698,6 +803,7 @@ class Iceberg:
                 ice['dz'] = xr.DataArray(data=dz_val, name='dz')
                 ice['dzk'] = xr.DataArray(data=dzk, name='dzk')
                 
+                ice = self._assign_variable_attrs(ice)
                 return ice
         
         
@@ -735,6 +841,7 @@ class Iceberg:
                 ice['dz'] = xr.DataArray(data=dz_val, name='dz')
                 ice['dzk'] = xr.DataArray(data=dzk, name='dzk')
                 
+                ice = self._assign_variable_attrs(ice)
                 return ice
             
             elif stability_method == 'equal':
@@ -774,4 +881,5 @@ class Iceberg:
                 if EC < self.STABILITY_THRESHOLD:
                     raise Exception("Still unstable, check W/H ratios")
                 
+                ice = self._assign_variable_attrs(ice)
                 return ice
