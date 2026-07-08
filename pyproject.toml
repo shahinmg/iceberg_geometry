@@ -12,6 +12,7 @@ dependencies = [
     "scipy",
     "xarray",
     "scikit-learn",
+    "matplotlib",
 ]
 
 [tool.setuptools.packages.find]

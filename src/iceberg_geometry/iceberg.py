@@ -905,6 +905,109 @@ class Iceberg:
                 
                 if EC < self.STABILITY_THRESHOLD:
                     raise Exception("Still unstable, check W/H ratios")
-                
+
                 ice = self._assign_variable_attrs(ice)
                 return ice
+
+    def plot_iceberg_shape(self, ice=None, dimension='length', ax=None,
+                           figsize=(6, 8)):
+        """
+        Plot a vertical cross-section (silhouette) of the iceberg.
+
+        Draws the above-water sail and the tapering underwater keel to scale,
+        with the waterline at height 0. Depths are shown as negative heights so
+        the keel extends downward. The horizontal axis is a symmetric section
+        through the iceberg's length or width.
+
+        Parameters
+        ----------
+        ice : xarray.Dataset, optional
+            A dataset produced by :meth:`init_iceberg_size`. If None (default),
+            geometry is computed by calling ``self.init_iceberg_size()``.
+        dimension : {'length', 'width'}, optional
+            Which horizontal dimension to section through. 'length' uses the
+            underwater length (``uwL``); 'width' uses the underwater width
+            (``uwW``). Default is 'length'.
+        ax : matplotlib.axes.Axes, optional
+            Axes to draw into. If None, a new figure and axes are created.
+        figsize : tuple of float, optional
+            Figure size in inches, used only when ``ax`` is None. Default (6, 8).
+
+        Returns
+        -------
+        fig, ax : matplotlib Figure and Axes
+            The figure and axes containing the plot.
+
+        Examples
+        --------
+        >>> berg = Iceberg(length=300, dz=5)
+        >>> fig, ax = berg.plot_iceberg_shape()
+        >>> fig.savefig('iceberg.png', dpi=150, bbox_inches='tight')
+        """
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Rectangle
+
+        if ice is None:
+            ice = self.init_iceberg_size()
+
+        if dimension == 'length':
+            profile = np.asarray(ice.uwL.values, dtype=float).ravel()
+            waterline = float(ice.L)
+            dim_label = 'Length'
+        elif dimension == 'width':
+            profile = np.asarray(ice.uwW.values, dtype=float).ravel()
+            waterline = float(ice.W)
+            dim_label = 'Width'
+        else:
+            raise ValueError("dimension must be 'length' or 'width'")
+
+        z = np.asarray(ice.Z.values, dtype=float)
+        keel = float(ice.keel)
+        freeB = float(ice.freeB)
+
+        # keep only valid underwater layers, and anchor the profile at the
+        # waterline (z=0) with the full waterline dimension
+        valid = ~np.isnan(profile)
+        zt = np.concatenate(([0.0], z[valid]))
+        half = np.concatenate(([waterline / 2.0], profile[valid] / 2.0))
+
+        if ax is None:
+            fig, ax = plt.subplots(figsize=figsize)
+        else:
+            fig = ax.figure
+
+        # muted palette: light sail ice, deeper-blue keel ice, faint water
+        sail_color = '#dbeafe'
+        keel_color = '#93c5e8'
+        edge_color = '#1e3a5f'
+        water_color = '#eef5fb'
+        waterline_color = '#2563a6'
+
+        xmax = np.nanmax(half) * 1.25
+
+        # water region below the waterline
+        ax.axhspan(-keel * 1.08, 0.0, color=water_color, zorder=0)
+        # underwater keel silhouette (depth as negative height)
+        ax.fill_betweenx(-zt, -half, half, facecolor=keel_color,
+                         edgecolor=edge_color, linewidth=1.2, zorder=2)
+        # above-water sail block
+        ax.add_patch(Rectangle((-waterline / 2.0, 0.0), waterline, freeB,
+                               facecolor=sail_color, edgecolor=edge_color,
+                               linewidth=1.2, zorder=2))
+        # waterline
+        ax.axhline(0.0, color=waterline_color, linestyle='--', linewidth=1.0,
+                   zorder=3)
+
+        ax.set_xlim(-xmax, xmax)
+        ax.set_ylim(-keel * 1.08, max(freeB * 2.5, keel * 0.08))
+        ax.set_xlabel(f'{dim_label} (m)')
+        ax.set_ylabel('Height relative to waterline (m)')
+        ax.set_title(f'Iceberg cross-section  (L = {float(ice.L):.0f} m, '
+                     f'keel = {keel:.0f} m)')
+        for spine in ('top', 'right'):
+            ax.spines[spine].set_visible(False)
+        ax.grid(True, axis='y', color='0.9', linewidth=0.6)
+        ax.set_axisbelow(True)
+        ax.set_aspect('equal', adjustable='box')
+
+        return fig, ax
