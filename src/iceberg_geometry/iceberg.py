@@ -32,6 +32,7 @@ from scipy.spatial import cKDTree, KDTree
 import xarray as xr
 from math import ceil
 from sklearn.linear_model import LinearRegression
+from importlib.metadata import version, PackageNotFoundError
 
 # Import constants module
 try:
@@ -204,6 +205,29 @@ class Iceberg:
         for name, attrs in self.VARIABLE_ATTRS.items():
             if name in ds.variables:
                 ds[name].attrs.update(attrs)
+        return ds
+
+    def _assign_global_attrs(self, ds):
+        """Attach dataset-level (global) metadata so a saved netCDF is self-documenting.
+
+        Sets a title, model description, references, provenance, and a creation
+        timestamp on ``ds.attrs`` and returns the same dataset.
+        """
+        try:
+            pkg_version = version("iceberg-geometry")
+        except PackageNotFoundError:
+            pkg_version = "unknown"
+
+        ds.attrs.update({
+            "title": "Iceberg geometry and stability model output",
+            "summary": (
+                "Underwater and above-water iceberg geometry derived from waterline "
+                "length using empirical shape relationships (Barker et al. 2004) and a "
+                "hydrostatic stability criterion (Wagner et al. 2014)."
+            ),
+            "model_version": pkg_version,
+            "references": " | ".join(self.citation().values()),
+        })
         return ds
 
 
@@ -664,6 +688,7 @@ class Iceberg:
                               )
 
         icebergs = self._assign_variable_attrs(icebergs)
+        icebergs = self._assign_global_attrs(icebergs)
         return icebergs
     
     def init_iceberg_size(self, stability_method='equal', quiet=True):
