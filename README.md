@@ -81,7 +81,7 @@ ice.to_netcdf("iceberg.nc")
 ## Sermilik calibration
 
 Two options recalibrate the model to deep-keeled Sermilik Fjord icebergs and other similar fjord systems
-(Schild et al. 2021; Sulak et al. 2017), valid for **large icebergs (L ≳ 400 m)**:
+(Schild et al. 2021; Sulak et al. 2017), suitable for **large icebergs (L ≳ 400 m)**:
 
 - `keel_method='schild'` — deeper keel via the measured ~2:1 length-to-keel ratio.
 - `volume_law='sulak'` — corrects the tabular volume overestimate using the
