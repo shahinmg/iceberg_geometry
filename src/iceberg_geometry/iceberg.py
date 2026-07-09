@@ -25,6 +25,7 @@ Key References:
 
 """
 
+import warnings
 import numpy as np
 import numpy.matlib
 from scipy.interpolate import interp1d, interp2d
@@ -47,10 +48,6 @@ except ImportError:
 class Iceberg:
     """
     A class for modeling iceberg geometry and stability.
-    
-    This class implements iceberg shape models from Barker et al. 2004 and
-    stability criteria from Wagner et al. 2017 to calculate underwater and
-    above-water geometry of icebergs based on their length.
     
     Parameters
     ----------
@@ -198,9 +195,6 @@ class Iceberg:
 
     def _assign_variable_attrs(self, ds):
         """Attach descriptive attrs (long_name, units, description) to a dataset.
-
-        Applies :attr:`VARIABLE_ATTRS` to any matching data variable or
-        coordinate present in ``ds`` and returns the same dataset.
         """
         for name, attrs in self.VARIABLE_ATTRS.items():
             if name in ds.variables:
@@ -210,8 +204,6 @@ class Iceberg:
     def _assign_global_attrs(self, ds):
         """Attach dataset-level (global) metadata so a saved netCDF is self-documenting.
 
-        Sets a title, model description, references, provenance, and a creation
-        timestamp on ``ds.attrs`` and returns the same dataset.
         """
         try:
             pkg_version = version("iceberg-geometry")
@@ -354,12 +346,15 @@ class Iceberg:
         
         Parameters
         ----------
-        method : {'barker', 'hotzel', 'constant', 'mean'}, optional
+        method : {'barker', 'hotzel', 'constant', 'schild', 'mean'}, optional
             Keel depth calculation method. Default is 'barker'.
-            
+
             - 'barker' : Barker et al. 2004 model: K = 2.91 * L^0.71
             - 'hotzel' : Hotzel model: K = 3.78 * L^0.63
             - 'constant' : Simple proportional: K = 0.7 * L
+            - 'schild' : Sermilik large-iceberg ratio K = L / 1.98 (~2:1),
+              from Schild et al. 2021. Calibrated on two deep-keeled Sermilik
+              icebergs (L ~ 500-730 m); warns below ~400 m (outside its range).
             - 'mean' : Average of multiple methods including hybrid approach
     
         Returns
@@ -417,7 +412,19 @@ class Iceberg:
         
         elif method == 'constant':
             result = const.CONSTANT_KEEL_RATIO * L_10
-        
+
+        elif method == 'schild':
+            # Sermilik large-iceberg calibration: keel = L / ~2 (Schild et al.
+            # 2021 ~2:1 surface-length-to-keel-depth ratio). Valid for large
+            # bergs only; warn below the calibration range.
+            if np.any(L_10 < const.SCHILD_MIN_LENGTH):
+                warnings.warn(
+                    f"method='schild' is calibrated on large Sermilik icebergs "
+                    f"(L ~ 500-730 m); length < {const.SCHILD_MIN_LENGTH} m is "
+                    f"outside its range -- consider method='barker'.",
+                    stacklevel=2)
+            result = L_10 / const.SCHILD_LENGTH_TO_KEEL_RATIO
+
         elif method == 'mean':
             # Create a 2D array: rows = icebergs, columns = different methods
             keel_arr = np.zeros((len(L_10), 4))
@@ -432,7 +439,12 @@ class Iceberg:
             keel_arr[:, 3] = const.CONSTANT_KEEL_RATIO * L_10
             
             result = np.mean(keel_arr, axis=1)
-        
+
+        else:
+            raise ValueError(
+                f"Unknown keel depth method {method!r}; expected one of "
+                "'barker', 'hotzel', 'constant', 'schild', 'mean'.")
+
         # Return scalar if input was scalar
         if input_is_scalar and result.size == 1:
             return float(result.item())
@@ -440,14 +452,10 @@ class Iceberg:
             return result
 
 
-    def barker_carea(self, keel_depth, dz, LWratio=1.62, tabular=200, method='barker'):
+    def barker_carea(self, keel_depth, dz, LWratio=1.62, tabular=200, method='barker',
+                     volume_law=None):
         """
         Calculate underwater cross-sectional areas and iceberg geometry using Barker et al. 2004 model.
-        
-        This method computes the underwater shape characteristics of an iceberg by calculating
-        cross-sectional areas for depth layers. For icebergs with keel depth ≤200m (or custom
-        tabular threshold), it uses empirical relationships from Barker et al. 2004. For deeper
-        icebergs, it assumes a tabular shape with constant rectangular cross-sections.
         
         Parameters
         ----------
@@ -687,11 +695,50 @@ class Iceberg:
                               coords = {'Z': z_coord_flat}
                               )
 
+        # Optional volume calibration: taper the underwater cross-section so the
+        # total volume matches the empirical waterline-footprint-area to volume
+        # relation (Sulak et al. 2017 / Schild et al. 2021), instead of the prism
+        # (tabular) assumption that overestimates large-berg volume by ~2x. The
+        # cross-section keeps its full width at the waterline and tapers linearly
+        # to the keel (widest at the surface, like the paper's meshes); the taper
+        # strength is solved to hit the target volume. uwV/cross_area also carry
+        # the footprint shape factor (rounded plan-view), so uwV includes it by
+        # design (uwV != dz*uwL*uwW). Waterline L/W are unaffected.
+        if volume_law == 'sulak':
+            L_wl = float(np.asarray(L).ravel()[0])
+            kd = float(np.asarray(keel_depth).ravel()[0])
+            A_wl = const.FOOTPRINT_SHAPE_FACTOR * L_wl * (L_wl / LWratio)
+            V_uw_target = (const.AREA_VOLUME_COEFFICIENT
+                           * A_wl ** const.AREA_VOLUME_EXPONENT
+                           * const.DENSITY_RATIO_ICE_TO_WATER)
+            # rounded-footprint prism volume (no taper): the ceiling to taper from
+            prism = const.FOOTPRINT_SHAPE_FACTOR * float(np.nansum(icebergs['uwV'].values))
+            if prism > 0:
+                # solve 1 - a + a^2/3 = target/prism for the linear-taper param a,
+                # where cross-section width scales (1 - a*z/keel), a in [0, 1]
+                g = min(1.0, max(1.0 / 3.0, V_uw_target / prism))
+                a = 1.5 * (1.0 - np.sqrt(max(0.0, 1.0 - (4.0 / 3.0) * (1.0 - g))))
+                z = icebergs['Z'].values.astype(float)
+                taper = np.clip(1.0 - a * z / kd, 1.0 - a, 1.0)[:, None]
+                icebergs['uwL'] = icebergs['uwL'] * taper
+                icebergs['uwW'] = icebergs['uwW'] * taper
+                icebergs['cross_area'] = icebergs['cross_area'] * taper
+                icebergs['uwV'] = (icebergs['uwV'] * const.FOOTPRINT_SHAPE_FACTOR
+                                   * taper ** 2)
+                icebergs.attrs['volume_law'] = (
+                    f"V=c*A^x (c={const.AREA_VOLUME_COEFFICIENT}, "
+                    f"x={const.AREA_VOLUME_EXPONENT}, Sulak 2017/Schild 2021); "
+                    f"linear keel taper to {1.0 - a:.2f} of waterline")
+        elif volume_law is not None:
+            raise ValueError(
+                f"Unknown volume_law {volume_law!r}; expected 'sulak' or None.")
+
         icebergs = self._assign_variable_attrs(icebergs)
         icebergs = self._assign_global_attrs(icebergs)
         return icebergs
-    
-    def init_iceberg_size(self, stability_method='equal', quiet=True):
+
+    def init_iceberg_size(self, stability_method='equal', quiet=True,
+                          keel_method='barker', volume_law=None):
         """
         Initialize complete iceberg geometry and ensure hydrostatic stability.
         
@@ -713,7 +760,16 @@ class Iceberg:
         quiet : bool, optional
             If False, prints diagnostic messages when stability adjustments are made.
             Default is True (suppresses output).
-        
+        keel_method : str, optional
+            Keel depth method passed to :meth:`keeldepth` (default 'barker').
+            Use 'schild' for the Sermilik large-iceberg calibration (K = L/1.98).
+        volume_law : {None, 'sulak'}, optional
+            If 'sulak', rescale the underwater cross-section so total volume
+            follows the empirical waterline-area-to-volume relation
+            V = 6.0*A^1.31 (Sulak et al. 2017 / Schild et al. 2021), correcting
+            the prism assumption that overestimates large-berg volume ~2x.
+            Default None keeps the original model volume.
+
         Returns
         -------
         ice : xarray.Dataset
@@ -752,11 +808,6 @@ class Iceberg:
         and H is total height (thickness). Icebergs with W/H < 0.92 are prone to
         rolling and are adjusted using the specified stability_method.
         
-        **Buoyancy Calculation:**
-        Uses Archimedes' principle with ice density ρ_ice = 917 kg/m³ and seawater
-        density ρ_water = 1024 kg/m³. The ratio determines that approximately 89.5%
-        of the iceberg volume is underwater.
-        
         **Stability Methods:**
         
         *Equal method (default):*
@@ -793,11 +844,18 @@ class Iceberg:
         
         # Ensure self.dz is scalar
         dz_val = float(self.dz.item()) if isinstance(self.dz, np.ndarray) else float(self.dz)
-        
-        keel_depth = self.keeldepth(method='barker')
+
+        # When the volume is calibrated to the footprint-area law, freeboard must
+        # use the real (rounded) waterline footprint area, not the L x W
+        # rectangle -- otherwise the footprint-shape part of the volume
+        # correction wrongly shrinks freeboard (only the keel taper should).
+        fp_area_factor = (const.FOOTPRINT_SHAPE_FACTOR
+                          if volume_law == 'sulak' else 1.0)
+
+        keel_depth = self.keeldepth(method=keel_method)
         
         # now get underwater shape, based on Barker for K<200, tabular for K>200, and 
-        ice = self.barker_carea(keel_depth, dz_val) # LWratio = 1.62 this gives you uwL, uwW, uwV, uwM, and vector Z down to keel depth
+        ice = self.barker_carea(keel_depth, dz_val, volume_law=volume_law) # LWratio = 1.62 this gives you uwL, uwW, uwV, uwM, and vector Z down to keel depth
         
         # from underwater volume, calculate above water volume
         density_ratio = const.DENSITY_RATIO_ICE_TO_WATER  # ratio of ice density to water density
@@ -806,7 +864,7 @@ class Iceberg:
         sail_volume = total_volume - np.nansum(ice.uwV,axis=0) # sail volume is above water volune
         
         waterline_width = self.length / const.DEFAULT_LENGTH_TO_WIDTH_RATIO
-        freeB = sail_volume / (self.length * waterline_width) # Freeboard height
+        freeB = sail_volume / (self.length * waterline_width * fp_area_factor) # Freeboard height
         # length = L.copy()
         thickness = keel_depth + freeB # total thickness
         deepest_keel = np.ceil(keel_depth/dz_val) # index of deepest iceberg layer, % ice.keeli = round(K./dz)
@@ -843,11 +901,11 @@ class Iceberg:
                 diff_thick_width = thickness - waterline_width # Get stable thickness
                 keel_new = keel_depth - density_ratio * diff_thick_width # change by percent of difference
                 
-                ice = self.barker_carea(keel_new, dz_val)
+                ice = self.barker_carea(keel_new, dz_val, volume_law=volume_law)
                 total_volume = (1/density_ratio) * np.nansum(ice.uwV,axis=0) #double check axis need rows, ~87% of ice underwater
                 sail_volume = total_volume - np.nansum(ice.uwV,axis=0) # sail volume is above water volune
                 waterline_width = self.length / const.DEFAULT_LENGTH_TO_WIDTH_RATIO 
-                freeB = sail_volume / (self.length * waterline_width) # Freeboard height
+                freeB = sail_volume / (self.length * waterline_width * fp_area_factor) # Freeboard height
                 # length = L.copy()
                 thickness = keel_depth + freeB # total thickness
                 deepest_keel = np.ceil(keel_depth/dz_val) # index of deepest iceberg layer, % ice.keeli = round(K./dz)
@@ -878,12 +936,12 @@ class Iceberg:
                 width_temporary = self.STABILITY_THRESHOLD * thickness[0]
                 lw_ratio = np.floor((100*self.length)/width_temporary)/100 # round down to hundredth place
                 
-                ice = self.barker_carea(keel_depth, dz_val, LWratio=lw_ratio)
+                ice = self.barker_carea(keel_depth, dz_val, LWratio=lw_ratio, volume_law=volume_law)
                 
                 total_volume = (1/density_ratio) * np.nansum(ice.uwV,axis=0) #double check axis need rows, ~87% of ice underwater
                 sail_volume = total_volume - np.nansum(ice.uwV,axis=0) # sail volume is above water volune
                 waterline_width = self.length / lw_ratio 
-                freeB = sail_volume / (self.length * waterline_width) # Freeboard height
+                freeB = sail_volume / (self.length * waterline_width * fp_area_factor) # Freeboard height
                 # length = L.copy()
                 thickness = keel_depth + freeB # total thickness
                 deepest_keel = np.ceil(keel_depth/dz_val) # index of deepest iceberg layer, % ice.keeli = round(K./dz)
@@ -912,12 +970,8 @@ class Iceberg:
     def plot_iceberg_shape(self, ice=None, dimension='length', ax=None,
                            figsize=(6, 8)):
         """
-        Plot a vertical cross-section (silhouette) of the iceberg.
+        Plot a vertical cross-section of the iceberg.
 
-        Draws the above-water sail and the tapering underwater keel to scale,
-        with the waterline at height 0. Depths are shown as negative heights so
-        the keel extends downward. The horizontal axis is a symmetric section
-        through the iceberg's length or width.
 
         Parameters
         ----------
@@ -1009,5 +1063,106 @@ class Iceberg:
         ax.grid(True, axis='y', color='0.9', linewidth=0.6)
         ax.set_axisbelow(True)
         ax.set_aspect('equal', adjustable='box')
+
+        return fig, ax
+
+    def plot_iceberg_3d(self, ice=None, ax=None, figsize=(7, 8),
+                        elev=18, azim=-60):
+        """
+        Render a 3-D solid model of the iceberg.
+
+        Parameters
+        ----------
+        ice : xarray.Dataset, optional
+            A dataset produced by :meth:`init_iceberg_size`. If None (default),
+            geometry is computed by calling ``self.init_iceberg_size()``.
+        ax : mpl_toolkits.mplot3d.axes3d.Axes3D, optional
+            A 3-D axes to draw into. If None, a new figure and 3-D axes are made.
+        figsize : tuple of float, optional
+            Figure size in inches, used only when ``ax`` is None. Default (7, 8).
+        elev, azim : float, optional
+            Initial elevation and azimuth viewing angles in degrees.
+
+        Returns
+        -------
+        fig, ax : matplotlib Figure and 3-D Axes
+            The figure and axes containing the plot.
+
+        Examples
+        --------
+        >>> berg = Iceberg(length=300, dz=5)
+        >>> fig, ax = berg.plot_iceberg_3d()
+        >>> fig.savefig('iceberg_3d.png', dpi=150, bbox_inches='tight')
+        """
+        import matplotlib.pyplot as plt
+        from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+        if ice is None:
+            ice = self.init_iceberg_size()
+
+        uwL = np.asarray(ice.uwL.values, dtype=float).ravel()
+        uwW = np.asarray(ice.uwW.values, dtype=float).ravel()
+        z = np.asarray(ice.Z.values, dtype=float)
+        L = float(ice.L)
+        W = float(ice.W)
+        keel = float(ice.keel)
+        freeB = float(ice.freeB)
+
+        valid = ~np.isnan(uwL) & ~np.isnan(uwW)
+
+        # cross-sections from sail top down to the keel: (half_x, half_y, height)
+        sections = [
+            (L / 2.0, W / 2.0, freeB),   # sail top
+            (L / 2.0, W / 2.0, 0.0),     # waterline
+        ]
+        for hx, hy, zc in zip(uwL[valid] / 2.0, uwW[valid] / 2.0, -z[valid]):
+            sections.append((hx, hy, zc))
+
+        def corners(sec):
+            hx, hy, zc = sec
+            return [(hx, hy, zc), (hx, -hy, zc), (-hx, -hy, zc), (-hx, hy, zc)]
+
+        sail_color = '#dbeafe'
+        keel_color = '#93c5e8'
+        edge_color = '#1e3a5f'
+
+        faces, face_colors = [], []
+        # top cap (sail top)
+        faces.append(corners(sections[0]))
+        face_colors.append(sail_color)
+        # side walls: 4 quads between each pair of consecutive cross-sections
+        for i in range(len(sections) - 1):
+            c0, c1 = corners(sections[i]), corners(sections[i + 1])
+            col = sail_color if i == 0 else keel_color
+            for e in range(4):
+                faces.append([c0[e], c0[(e + 1) % 4],
+                              c1[(e + 1) % 4], c1[e]])
+                face_colors.append(col)
+        # bottom cap (keel)
+        faces.append(corners(sections[-1]))
+        face_colors.append(keel_color)
+
+        if ax is None:
+            fig = plt.figure(figsize=figsize)
+            ax = fig.add_subplot(111, projection='3d')
+        else:
+            fig = ax.figure
+
+        poly = Poly3DCollection(faces, facecolors=face_colors,
+                                edgecolors=edge_color, linewidths=0.25,
+                                alpha=0.95)
+        ax.add_collection3d(poly)
+
+        hx_max = max(s[0] for s in sections)
+        hy_max = max(s[1] for s in sections)
+        ax.set_xlim(-hx_max, hx_max)
+        ax.set_ylim(-hy_max, hy_max)
+        ax.set_zlim(-keel * 1.02, freeB)
+        ax.set_box_aspect((2 * hx_max, 2 * hy_max, keel + freeB))
+        ax.set_xlabel('Length (m)')
+        ax.set_ylabel('Width (m)')
+        ax.set_zlabel('Height rel. to waterline (m)')
+        ax.set_title(f'Iceberg 3-D  (L = {L:.0f} m, keel = {keel:.0f} m)')
+        ax.view_init(elev=elev, azim=azim)
 
         return fig, ax

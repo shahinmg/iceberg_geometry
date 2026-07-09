@@ -1,11 +1,6 @@
 """
-Physical and Model Constants for Iceberg Simulations
+Physical and Model Constants for Iceberg Geometry Calculations
 
-This module contains all physical constants, empirical parameters, and 
-configuration values used in the iceberg geometry and melt model.
-
-Constants follow PEP 8 convention of SCREAMING_SNAKE_CASE to indicate
-they should not be modified during runtime.
 
 References
 ----------
@@ -13,8 +8,8 @@ References
 - Barker, A., et al. (2004). ISOPE Conference Proceedings.
 - Wagner, T.J.W., et al. (2014). Geophysical Research Letters, 41, 5522-5529.
 - Dowdeswell, J.A., et al. (1992). Journal of Geophysical Research, 97, 3515-3528.
-- Jenkins, A. (2011). Journal of Physical Oceanography, 41, 2279-2294.
-- Bigg, G.R., et al. (1997). Cold Regions Science and Technology, 26, 113-135.
+- Sulak, D.J., et al. (2017). Annals of Glaciology, 58(74), 89-98.
+- Schild, K.M., et al. (2021). Geophysical Research Letters, doi:10.1029/2020GL089765.
 """
 
 # ==============================================================================
@@ -22,33 +17,11 @@ References
 # ==============================================================================
 
 # Densities (kg/m³)
-RHO_ICE = 917                  # Density of glacial ice
+RHO_ICE = 917                 # Density of glacial ice
 RHO_SEAWATER = 1024           # Typical seawater density
-RHO_FRESHWATER = 1000         # Pure water at 4°C
-RHO_AIR = 1.225               # Air density at sea level, 15°C
 
-# Derived density ratios
+# Derived density ratio (fraction of iceberg submerged by buoyancy)
 DENSITY_RATIO_ICE_TO_WATER = RHO_ICE / RHO_SEAWATER  # ~0.895 (89.5% submerged)
-DENSITY_RATIO_ICE_TO_FRESHWATER = RHO_ICE / RHO_FRESHWATER  # ~0.917
-
-# Thermal properties
-LATENT_HEAT_FUSION = 3.35e5   # J/kg - latent heat of fusion (ice→water) - CORRECTED to match original
-SPECIFIC_HEAT_ICE = 2009      # J/(kg·K) - specific heat capacity of ice
-SPECIFIC_HEAT_WATER = 3974    # J/(kg·K) - specific heat capacity of water
-
-# Temperature
-CORE_ICE_TEMPERATURE = -4     # °C - typical iceberg core temperature
-ICE_SURFACE_TEMPERATURE = -4  # °C - ice surface temperature for melt calculations
-TEMPERATURE_DIFFERENCE_CORE_SURFACE = 15  # K - temp difference for Antarctica (may be less for Greenland)
-
-# Optical properties
-ICE_ALBEDO = 0.7              # Fraction of solar radiation reflected by ice (dimensionless, 0-1)
-SOLAR_ABSORPTION_FRACTION = 1 - ICE_ALBEDO  # Fraction absorbed (0.3)
-
-# Fluid properties (air at ~15°C)
-AIR_KINEMATIC_VISCOSITY = 1.46e-5  # m²/s - kinematic viscosity of air
-AIR_THERMAL_DIFFUSIVITY = 2.16e-5  # m²/s - thermal diffusivity of air  
-AIR_THERMAL_CONDUCTIVITY = 0.0249  # W/(m·K) - thermal conductivity at 0°C
 
 # ==============================================================================
 # EMPIRICAL PARAMETERS (from literature)
@@ -65,6 +38,16 @@ CONSTANT_KEEL_RATIO = 0.7     # Simple proportional keel depth: K = 0.7 * L
 
 BARKER_HOTZEL_THRESHOLD = 160  # Meters - switch from Barker to Hotzel at this length
 
+# Schild et al. (2021) - Sermilik Fjord large-iceberg keel depth: K = L / ratio.
+# The surface-length-to-keel-depth ratio is ~2:1 (Schild et al. 2021, GRL,
+# doi:10.1029/2020GL089765, Results; reported as consistent with the range from
+# earlier multibeam work, Barker et al. 1999). The value below is the mean L/keel
+# over the four Schild surveys (Table 1: 1.90, 1.94, 2.03, 2.05). Calibrated on
+# two deep-keeled Sermilik icebergs (L ~ 500-730 m) -- valid for LARGE icebergs
+# only; Barker's sub-linear law is more appropriate for small bergs.
+SCHILD_LENGTH_TO_KEEL_RATIO = 1.98   # L / keel depth (dimensionless)
+SCHILD_MIN_LENGTH = 400              # m - below this, warn: outside calibration range
+
 # Barker et al. (2004) - Sail area coefficients (Table 4)
 SAIL_AREA_COEFFICIENT_A = 28.194    # Coefficient for sail area calculation
 SAIL_AREA_COEFFICIENT_B = -1420.2   # Offset for sail area calculation
@@ -80,10 +63,17 @@ TABULAR_ICEBERG_COEFFICIENT = 0.1211  # For sail area of tabular bergs
 
 # Wagner et al. (2017) - Stability criterion
 STABILITY_THRESHOLD_WH = 0.92  # W/H ratio threshold for stability (W/H ≥ 0.92 is stable)
-STABILITY_WIDTH_FACTOR = 0.7   # L/TH ratio for rolling check (used in time evolution)
+STABILITY_WIDTH_FACTOR = 0.7   # L/TH ratio for rolling check
 
 # Dowdeswell et al. (1992) - Shape ratios
 DEFAULT_LENGTH_TO_WIDTH_RATIO = 1.62  # Typical L:W ratio for Greenland icebergs
+
+# Waterline-footprint-area to total-volume relation: V_total = c * A^x.
+AREA_VOLUME_COEFFICIENT = 6.0   # c in V_total = c * A^x  (Sulak et al. 2017)
+AREA_VOLUME_EXPONENT = 1.31     # x  (Schild et al. 2021; Sulak 1.30)
+# Waterline footprint fills ~0.68 of its L x W bounding rectangle (mean over the
+# two Schild drone footprints: 0.66, 0.70), converting model L x W to real area.
+FOOTPRINT_SHAPE_FACTOR = 0.68
 
 # Model depth discretization
 DEFAULT_LAYER_THICKNESS_DZ = 5     # meters - default vertical layer thickness
@@ -91,78 +81,6 @@ ALTERNATIVE_LAYER_THICKNESS = 10   # meters - alternative layer thickness
 MAX_ICEBERG_DEPTH = 600            # meters - maximum depth modeled (defines z-grid)
 
 TABULAR_THRESHOLD_DEPTH = 200      # meters - keel depth above which assume tabular shape
-
-# ==============================================================================
-# MELT PARAMETERS
-# ==============================================================================
-
-# Jenkins (2011) / Holland & Jenkins (1999) - Transfer coefficients
-HEAT_TRANSFER_COEFFICIENT_GT = 1.1e-3   # Heat transfer coefficient (can be scaled by factor)
-SALT_TRANSFER_COEFFICIENT_GS = 3.1e-5   # Salt transfer coefficient (can be scaled by factor)
-
-# Jackson et al. (2020) - Adjustment factor for transfer coefficients
-DEFAULT_TRANSFER_COEFFICIENT_FACTOR = 1  # Multiplicative factor for GT and GS
-
-# Freezing point calculation coefficients
-FREEZING_POINT_SALINITY_COEFF = -5.73e-2    # °C/PSU - salinity contribution (a)
-FREEZING_POINT_CONSTANT = 8.32e-2           # °C - constant term (b)
-FREEZING_POINT_PRESSURE_COEFF = -7.61e-4    # °C/dbar - pressure contribution (c)
-
-# Alternative freezing point formula (Bigg method)
-BIGG_FP_COEFF_1 = -0.036        # First coefficient
-BIGG_FP_COEFF_2 = -0.0499       # Linear salinity term
-BIGG_FP_COEFF_3 = -0.0001128    # Quadratic salinity term
-BIGG_FP_EXPONENT_COEFF = -0.19  # Exponential term coefficient
-
-# Buoyant convection (Bigg/CIS method) - El-Tahan formula
-BUOYANT_MELT_LINEAR_COEFF = 7.62e-3    # m/(day·°C) - linear coefficient
-BUOYANT_MELT_QUADRATIC_COEFF_BIGG = 1.3e-3   # m/(day·°C²) - quadratic (Bigg)
-BUOYANT_MELT_QUADRATIC_COEFF_CIS = 1.29e-3   # m/(day·°C²) - quadratic (CIS)
-
-# Wave erosion (Silva et al. / Bigg formulation)
-WAVE_HEIGHT_WIND_COEFF_1 = 1.5     # Coefficient: wave_height = 1.5 * sqrt(wind)
-WAVE_HEIGHT_WIND_COEFF_2 = 0.1     # Coefficient: wave_height = ... + 0.1 * wind
-WAVE_MELT_DIVISOR = 12             # Divisor in melt rate formula
-WAVE_MELT_TEMP_OFFSET = 2          # Temperature offset (SST + 2)
-WAVE_HEIGHT_ESTIMATE_COEFF = 0.010125  # wind² coefficient for wave height estimation
-MAX_WAVE_PENETRATION_FACTOR = 5    # Wave height multiplier for penetration depth
-
-# Forced air convection - Nusselt number calculation  
-NUSSELT_COEFF = 0.058              # Coefficient in Nu = 0.058 * Re^0.8 / Pr^0.4
-NUSSELT_REYNOLDS_EXPONENT = 0.8    # Reynolds number exponent
-NUSSELT_PRANDTL_EXPONENT = 0.4     # Prandtl number exponent
-
-# ==============================================================================
-# TIME CONVERSIONS
-# ==============================================================================
-
-SECONDS_PER_DAY = 86400           # Standard conversion
-DAYS_PER_SECOND = 1 / SECONDS_PER_DAY  # Inverse
-
-# Default timestep
-DEFAULT_TIMESTEP_SECONDS = 86400  # 1 day
-DEFAULT_TIMESTEP_DAYS = 1         # 1 day
-
-# ==============================================================================
-# MELT MECHANISM MULTIPLIERS
-# ==============================================================================
-
-# Number of surfaces affected by each melt mechanism
-WAVE_LENGTH_SURFACES = 1    # Wave affects 1 length face
-WAVE_WIDTH_SURFACES = 1     # Wave affects 1 width face
-
-FORCED_WATER_LENGTH_SURFACES = 2   # Forced water affects 2 length faces (both sides)
-FORCED_WATER_WIDTH_SURFACES = 1    # Forced water affects 1 width face (lee side sheltered)
-FORCED_WATER_BASE_SURFACES = 1     # Forced water affects base
-
-FORCED_AIR_LENGTH_SURFACES = 2     # Forced air affects 2 length faces
-FORCED_AIR_WIDTH_SURFACES = 1      # Forced air affects 1 width face (lee sheltered)
-FORCED_AIR_TOP_SURFACE_FRACTION = 0.5  # Forced air affects half of top surface
-
-BUOYANT_WATER_LENGTH_SURFACES = 2  # Buoyant convection affects both length sides
-BUOYANT_WATER_WIDTH_SURFACES = 2   # Buoyant convection affects both width sides
-
-SOLAR_TOP_SURFACE_FRACTION = 1.0   # Solar affects entire top surface
 
 # ==============================================================================
 # NUMERICAL PARAMETERS
@@ -178,31 +96,8 @@ KEEL_DEPTH_ROUNDING_MULTIPLE = 10  # Round length to nearest 10m for keel calcul
 # CONFIGURATION FLAGS (Default values)
 # ==============================================================================
 
-# Default melt mechanisms to include
-DEFAULT_MELT_MECHANISMS = {
-    'wave': True,      # Wave erosion
-    'turbw': True,     # Forced convection in water
-    'turba': True,     # Forced convection in air
-    'freea': True,     # Free convection (solar) in air
-    'freew': True,     # Free (buoyant) convection in water
-}
-
-# Default stability methods
+# Default stability method
 DEFAULT_STABILITY_METHOD = 'equal'  # 'equal' or 'keel'
-
-# Default ice temperature usage
-DEFAULT_USE_CONSTANT_TF = False  # Whether to use constant thermal forcing
-DEFAULT_CONSTANT_TF = None       # Value if using constant thermal forcing
-
-# ==============================================================================
-# HELPER DERIVED CONSTANTS
-# ==============================================================================
-
-# Prandtl number (for forced air convection)
-PRANDTL_NUMBER = AIR_KINEMATIC_VISCOSITY / AIR_THERMAL_DIFFUSIVITY
-
-# Commonly used products
-RHO_ICE_TIMES_LATENT_HEAT = RHO_ICE * LATENT_HEAT_FUSION  # kg/m³ * J/kg = J/m³
 
 
 # ==============================================================================
@@ -212,7 +107,7 @@ RHO_ICE_TIMES_LATENT_HEAT = RHO_ICE * LATENT_HEAT_FUSION  # kg/m³ * J/kg = J/m�
 def validate_constants():
     """
     Validate that constants are physically reasonable.
-    
+
     Raises
     ------
     ValueError
@@ -221,16 +116,13 @@ def validate_constants():
     # Density checks
     assert 900 < RHO_ICE < 920, f"Ice density unreasonable: {RHO_ICE}"
     assert 1020 < RHO_SEAWATER < 1030, f"Seawater density unreasonable: {RHO_SEAWATER}"
-    
+
     # Ratio checks
     assert 0.89 < DENSITY_RATIO_ICE_TO_WATER < 0.90, "Ice/water ratio should be ~0.895"
-    
+
     # Stability check
     assert 0.9 < STABILITY_THRESHOLD_WH < 1.0, "Stability threshold should be ~0.92"
-    
-    # Thermal checks
-    assert LATENT_HEAT_FUSION > 3e5, "Latent heat seems too small"
-    
+
     print("✓ All constants validated successfully")
 
 
@@ -244,5 +136,5 @@ if __name__ == "__main__":
     print(f"Stability threshold (W/H): {STABILITY_THRESHOLD_WH}")
     print(f"Default L:W ratio: {DEFAULT_LENGTH_TO_WIDTH_RATIO}")
     print()
-    
+
     validate_constants()
