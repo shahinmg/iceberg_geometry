@@ -106,6 +106,22 @@ berg.plot_iceberg_shape(ice=ice)   # 2-D cross-section (waterline, sail, keel)
 berg.plot_iceberg_3d(ice=ice)      # 3-D solid
 ```
 
+![3-D view of a calibrated 733 m Sermilik iceberg](docs/berg733_3d.png)
+
+*`plot_iceberg_3d` output for a calibrated 733 m iceberg (keel 369 m): sail above the waterline, tapering keel below.*
+
+For a smaller, uncalibrated iceberg the natural Barker taper shows in the 2-D section:
+
+```python
+berg = Iceberg(length=300, dz=5)
+ice = berg.init_iceberg_size()          # default (Barker) model
+berg.plot_iceberg_shape(ice=ice)        # 2-D cross-section
+```
+
+![2-D cross-section of a 300 m iceberg](docs/berg_300.png)
+
+*`plot_iceberg_shape` for a default 300 m iceberg (keel 167 m, freeboard 19 m).*
+
 Both methods take a pre-computed `ice` dataset (pass `ice=...`), or compute a
 default one internally if omitted. They return `(fig, ax)`:
 
