@@ -47,7 +47,7 @@ and widens the iceberg if needed to keep it stable.
 ## The output dataset
 
 `init_iceberg_size()` returns an `xarray.Dataset`. Every variable carries
-`long_name`/`units` metadata (hover the variable in a notebook, or `ice.keel.attrs`):
+`long_name`/`units` metadata:
 
 | Variable | Meaning | Units |
 |---|---|---|
@@ -60,7 +60,7 @@ and widens the iceberg if needed to keep it stable.
 | `TH` | total thickness (keel + freeboard) | m |
 | `dz`, `dzk`, `keeli` | layer thickness, keel partial layer, deepest layer index | m, m, – |
 
-Save it like any xarray dataset — the metadata is written into the file:
+Save it like any xarray dataset:
 
 ```python
 ice.to_netcdf("iceberg.nc")
