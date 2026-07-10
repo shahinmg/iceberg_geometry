@@ -1,9 +1,6 @@
 # iceberg-geometry
 
-A Python model for **iceberg geometry and stability**. From a single input — the
-waterline length — it builds an iceberg's full above- and below-water shape:
-keel depth, per-depth cross-sections, volumes, freeboard, and a hydrostatic
-stability check.
+A Python model for **iceberg geometry**.
 
 The model is based on Moon et al. (2018), using the empirical shape relationships
 of Barker et al. (2004), the stability criterion of Wagner et al. (2014), and the
