@@ -78,7 +78,7 @@ FOOTPRINT_SHAPE_FACTOR = 0.68
 # Model depth discretization
 DEFAULT_LAYER_THICKNESS_DZ = 5     # meters - default vertical layer thickness
 ALTERNATIVE_LAYER_THICKNESS = 10   # meters - alternative layer thickness
-MAX_ICEBERG_DEPTH = 600            # meters - maximum depth modeled (defines z-grid)
+# MAX_ICEBERG_DEPTH = 600            # meters - maximum depth modeled (defines z-grid)
 
 TABULAR_THRESHOLD_DEPTH = 200      # meters - keel depth above which assume tabular shape
 

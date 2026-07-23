@@ -630,8 +630,8 @@ class Iceberg:
         # if(~isempty(ind))
         if K_ltab.size != 0: # check if empty
             for i in range(len(K_ltab)):
-                
-                kz = keel_depth[i] # keel depth
+
+                kz = keel_depth[K_ltab[i]] # keel depth
                 # dz_np = np.array([dz],dtype=np.float64)
                 kza = np.ceil(kz/dz) # layer index for keel depth
                 # kza = ceil(kz,dz) # layer index for keel depth
@@ -644,7 +644,7 @@ class Iceberg:
                 
                 for nl in range(kza):
                     # Extract scalar values from 2D arrays a and b
-                    temp[nl,i] = a[nl, 0] * L[K_ltab[i]] + b[nl, 0]
+                    temp[nl,K_ltab[i]] = a[nl, 0] * L[K_ltab[i]] + b[nl, 0]
                     
             temps[K_ltab] = a_s * L[K_ltab] + b_s
             
