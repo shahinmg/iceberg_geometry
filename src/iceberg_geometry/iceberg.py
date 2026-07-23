@@ -453,7 +453,7 @@ class Iceberg:
 
 
     def barker_carea(self, keel_depth, dz, LWratio=1.62, tabular=200, method='barker',
-                     volume_law=None):
+                     volume_law=None, area=None):
         """
         Calculate underwater cross-sectional areas and iceberg geometry using Barker et al. 2004 model.
         
@@ -474,7 +474,20 @@ class Iceberg:
         method : str, optional
             Iceberg shape model to use. Default is 'barker'. Currently only 'barker'
             is implemented in this method.
-        
+        volume_law : {None, 'sulak'}, optional
+            If 'sulak', taper the underwater cross-section so total volume follows
+            the empirical waterline-area-to-volume relation V = c*A^x
+            (Sulak et al. 2017 / Schild et al. 2021). Default None keeps the prism
+            volume. Note this makes uwV = shape_factor * dz * uwL * uwW (the
+            rounded-footprint shape factor is folded into uwV), so accurate
+            underwater volume is nansum(uwV), not dz*uwL*uwW.
+        area : float, optional
+            Measured waterline footprint area A (m², plan-view, e.g. from a
+            segmented iceberg polygon). Only used when volume_law='sulak'. When
+            given, A is used directly in V = c*A^x -- exactly Sulak et al.'s input
+            -- instead of estimating it from length via FOOTPRINT_SHAPE_FACTOR.
+            Must be positive. Default None (estimate A from length).
+
         Returns
         -------
         icebergs : xarray.Dataset
@@ -706,13 +719,26 @@ class Iceberg:
         # design (uwV != dz*uwL*uwW). Waterline L/W are unaffected.
         if volume_law == 'sulak':
             L_wl = float(np.asarray(L).ravel()[0])
+            W_wl = L_wl / LWratio
             kd = float(np.asarray(keel_depth).ravel()[0])
-            A_wl = const.FOOTPRINT_SHAPE_FACTOR * L_wl * (L_wl / LWratio)
+            # Waterline footprint area A fed into Sulak's V = c*A^x. If a measured
+            # (segmented) polygon area is supplied, use it directly -- that is
+            # exactly Sulak et al.'s input. Otherwise fall back to estimating it
+            # from length via the rounded-rectangle FOOTPRINT_SHAPE_FACTOR.
+            if area is not None:
+                A_wl = float(area)
+                if A_wl <= 0:
+                    raise ValueError(f"area must be positive, got {area}")
+            else:
+                A_wl = const.FOOTPRINT_SHAPE_FACTOR * L_wl * W_wl
+            # effective fill fraction of the L x W bounding box for this berg;
+            # equals FOOTPRINT_SHAPE_FACTOR when area is not supplied.
+            shape_factor = A_wl / (L_wl * W_wl)
             V_uw_target = (const.AREA_VOLUME_COEFFICIENT
                            * A_wl ** const.AREA_VOLUME_EXPONENT
                            * const.DENSITY_RATIO_ICE_TO_WATER)
             # rounded-footprint prism volume (no taper): the ceiling to taper from
-            prism = const.FOOTPRINT_SHAPE_FACTOR * float(np.nansum(icebergs['uwV'].values))
+            prism = shape_factor * float(np.nansum(icebergs['uwV'].values))
             if prism > 0:
                 # solve 1 - a + a^2/3 = target/prism for the linear-taper param a,
                 # where cross-section width scales (1 - a*z/keel), a in [0, 1]
@@ -723,12 +749,13 @@ class Iceberg:
                 icebergs['uwL'] = icebergs['uwL'] * taper
                 icebergs['uwW'] = icebergs['uwW'] * taper
                 icebergs['cross_area'] = icebergs['cross_area'] * taper
-                icebergs['uwV'] = (icebergs['uwV'] * const.FOOTPRINT_SHAPE_FACTOR
+                icebergs['uwV'] = (icebergs['uwV'] * shape_factor
                                    * taper ** 2)
                 icebergs.attrs['volume_law'] = (
                     f"V=c*A^x (c={const.AREA_VOLUME_COEFFICIENT}, "
                     f"x={const.AREA_VOLUME_EXPONENT}, Sulak 2017/Schild 2021); "
-                    f"linear keel taper to {1.0 - a:.2f} of waterline")
+                    f"A={'measured' if area is not None else 'from length'} "
+                    f"({A_wl:.0f} m^2); linear keel taper to {1.0 - a:.2f} of waterline")
         elif volume_law is not None:
             raise ValueError(
                 f"Unknown volume_law {volume_law!r}; expected 'sulak' or None.")
@@ -738,7 +765,7 @@ class Iceberg:
         return icebergs
 
     def init_iceberg_size(self, stability_method='equal', quiet=True,
-                          keel_method='barker', volume_law=None):
+                          keel_method='barker', volume_law=None, area=None):
         """
         Initialize complete iceberg geometry and ensure hydrostatic stability.
         
@@ -769,6 +796,13 @@ class Iceberg:
             V = 6.0*A^1.31 (Sulak et al. 2017 / Schild et al. 2021), correcting
             the prism assumption that overestimates large-berg volume ~2x.
             Default None keeps the original model volume.
+        area : float, optional
+            Measured waterline footprint area A (m², plan-view, e.g. from a
+            segmented iceberg polygon). Only used when volume_law='sulak'. When
+            given, total volume follows V = 6.0*A^1.31 using the real measured A
+            -- exactly Sulak et al.'s input -- instead of estimating A from length
+            via FOOTPRINT_SHAPE_FACTOR. Length is still used for keel depth and the
+            cross-section profile. Must be positive. Default None.
 
         Returns
         -------
@@ -845,17 +879,31 @@ class Iceberg:
         # Ensure self.dz is scalar
         dz_val = float(self.dz.item()) if isinstance(self.dz, np.ndarray) else float(self.dz)
 
-        # When the volume is calibrated to the footprint-area law, freeboard must
-        # use the real (rounded) waterline footprint area, not the L x W
-        # rectangle -- otherwise the footprint-shape part of the volume
-        # correction wrongly shrinks freeboard (only the keel taper should).
-        fp_area_factor = (const.FOOTPRINT_SHAPE_FACTOR
-                          if volume_law == 'sulak' else 1.0)
+        if area is not None:
+            if volume_law != 'sulak':
+                raise ValueError(
+                    "area is only used with volume_law='sulak'; "
+                    f"got volume_law={volume_law!r}")
+            if area <= 0:
+                raise ValueError(f"area must be positive, got {area}")
+
+        # Waterline footprint area used to convert sail volume -> freeboard height.
+        # When the volume is calibrated to the footprint-area law, this must be the
+        # real (rounded) waterline footprint, not the L x W rectangle -- otherwise
+        # the footprint-shape part of the volume correction wrongly shrinks
+        # freeboard (only the keel taper should). A measured `area` is used
+        # directly when supplied; otherwise it is estimated from length.
+        def _footprint_area(width):
+            if volume_law == 'sulak':
+                if area is not None:
+                    return float(area)
+                return const.FOOTPRINT_SHAPE_FACTOR * self.length * width
+            return self.length * width
 
         keel_depth = self.keeldepth(method=keel_method)
         
         # now get underwater shape, based on Barker for K<200, tabular for K>200, and 
-        ice = self.barker_carea(keel_depth, dz_val, volume_law=volume_law) # LWratio = 1.62 this gives you uwL, uwW, uwV, uwM, and vector Z down to keel depth
+        ice = self.barker_carea(keel_depth, dz_val, volume_law=volume_law, area=area) # LWratio = 1.62 this gives you uwL, uwW, uwV, uwM, and vector Z down to keel depth
         
         # from underwater volume, calculate above water volume
         density_ratio = const.DENSITY_RATIO_ICE_TO_WATER  # ratio of ice density to water density
@@ -864,7 +912,7 @@ class Iceberg:
         sail_volume = total_volume - np.nansum(ice.uwV,axis=0) # sail volume is above water volune
         
         waterline_width = self.length / const.DEFAULT_LENGTH_TO_WIDTH_RATIO
-        freeB = sail_volume / (self.length * waterline_width * fp_area_factor) # Freeboard height
+        freeB = sail_volume / _footprint_area(waterline_width) # Freeboard height
         # length = L.copy()
         thickness = keel_depth + freeB # total thickness
         deepest_keel = np.ceil(keel_depth/dz_val) # index of deepest iceberg layer, % ice.keeli = round(K./dz)
@@ -901,11 +949,11 @@ class Iceberg:
                 diff_thick_width = thickness - waterline_width # Get stable thickness
                 keel_new = keel_depth - density_ratio * diff_thick_width # change by percent of difference
                 
-                ice = self.barker_carea(keel_new, dz_val, volume_law=volume_law)
+                ice = self.barker_carea(keel_new, dz_val, volume_law=volume_law, area=area)
                 total_volume = (1/density_ratio) * np.nansum(ice.uwV,axis=0) #double check axis need rows, ~87% of ice underwater
                 sail_volume = total_volume - np.nansum(ice.uwV,axis=0) # sail volume is above water volune
                 waterline_width = self.length / const.DEFAULT_LENGTH_TO_WIDTH_RATIO 
-                freeB = sail_volume / (self.length * waterline_width * fp_area_factor) # Freeboard height
+                freeB = sail_volume / _footprint_area(waterline_width) # Freeboard height
                 # length = L.copy()
                 thickness = keel_depth + freeB # total thickness
                 deepest_keel = np.ceil(keel_depth/dz_val) # index of deepest iceberg layer, % ice.keeli = round(K./dz)
@@ -936,12 +984,12 @@ class Iceberg:
                 width_temporary = self.STABILITY_THRESHOLD * thickness[0]
                 lw_ratio = np.floor((100*self.length)/width_temporary)/100 # round down to hundredth place
                 
-                ice = self.barker_carea(keel_depth, dz_val, LWratio=lw_ratio, volume_law=volume_law)
+                ice = self.barker_carea(keel_depth, dz_val, LWratio=lw_ratio, volume_law=volume_law, area=area)
                 
                 total_volume = (1/density_ratio) * np.nansum(ice.uwV,axis=0) #double check axis need rows, ~87% of ice underwater
                 sail_volume = total_volume - np.nansum(ice.uwV,axis=0) # sail volume is above water volune
                 waterline_width = self.length / lw_ratio 
-                freeB = sail_volume / (self.length * waterline_width * fp_area_factor) # Freeboard height
+                freeB = sail_volume / _footprint_area(waterline_width) # Freeboard height
                 # length = L.copy()
                 thickness = keel_depth + freeB # total thickness
                 deepest_keel = np.ceil(keel_depth/dz_val) # index of deepest iceberg layer, % ice.keeli = round(K./dz)
