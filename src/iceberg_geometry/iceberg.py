@@ -155,11 +155,21 @@ class Iceberg:
             "long_name": "Wetted (submerged) surface area",
             "units": "m2",
             "description": "Submerged surface area (lateral walls plus basal footprint) "
-                           "estimated from the per-layer length/width as a smooth stack "
-                           "of rectangular slabs. A LOWER BOUND on the true wetted area: "
-                           "it excludes surface roughness, which Schild et al. (2021) "
-                           "find makes real icebergs 22-43% larger in area than idealized "
-                           "shapes. Relevant to submarine melt (melt scales with area).",
+                           "from the per-layer length/width as a smooth stack of "
+                           "rectangular slabs, multiplied by the roughness factor. Real "
+                           "ice is crevassed/ridged and has more area than a smooth shape "
+                           "(Schild et al. 2021). The smooth-geometry area is wettedA / "
+                           "roughness. Relevant to submarine melt (melt scales with area).",
+        },
+        "roughness": {
+            "long_name": "Surface roughness enhancement factor",
+            "units": "1",
+            "description": "Multiplier applied to the smooth-geometry wetted area to "
+                           "account for surface roughness (true rough area / smooth area). "
+                           "Default 1.18 is the mean measured drone 3-D-area/plan-area ratio "
+                           "at ~1 m scale over the three Schild et al. (2021) drone surveys "
+                           "(Icebergs A, B). Scale-dependent and measured above-water; see "
+                           "SURFACE_ROUGHNESS_FACTOR.",
         },
         "W": {
             "long_name": "Waterline width",
@@ -238,6 +248,18 @@ class Iceberg:
         lateral = float(np.sum(2.0 * (L + W)) * dz)  # sum of perimeter * layer thickness
         basal = float(L[-1] * W[-1])                 # bottom footprint of the keel layer
         return lateral + basal
+
+    def _add_surface_area(self, ice, dz, roughness_factor):
+        """Add wetted-surface-area variables to a geometry dataset.
+
+        Stores ``wettedA`` (smooth geometric area times the roughness factor) and
+        ``roughness`` (the factor used). The smooth area is recoverable as
+        ``wettedA / roughness``.
+        """
+        smooth = self._wetted_surface_area(ice, dz)
+        ice['wettedA'] = xr.DataArray(data=smooth * roughness_factor, name='wettedA')
+        ice['roughness'] = xr.DataArray(data=float(roughness_factor), name='roughness')
+        return ice
 
     def _assign_variable_attrs(self, ds):
         """Attach descriptive attrs (long_name, units, description) to a dataset.
@@ -812,7 +834,7 @@ class Iceberg:
 
     def init_iceberg_size(self, stability_method='equal', quiet=True,
                           keel_method='barker', volume_law=None, area=None,
-                          width=None):
+                          width=None, roughness_factor=None):
         """
         Initialize complete iceberg geometry and ensure hydrostatic stability.
         
@@ -860,6 +882,13 @@ class Iceberg:
             ratio would otherwise underestimate. Note the 'equal' stability
             method may still widen an unstable berg beyond this width. Must be
             positive. Default None (use the 1.62 ratio).
+        roughness_factor : float, optional
+            Multiplier applied to the smooth-geometry wetted surface area to
+            account for surface roughness (crevasses, ridges), stored as the
+            ``roughness`` variable. Default None uses
+            ``SURFACE_ROUGHNESS_FACTOR`` (1.18, mean of the three Schild et al.
+            2021 drone surveys at ~1 m scale). Pass 1.0 for the pure smooth area.
+            Must be positive.
 
         Returns
         -------
@@ -956,6 +985,15 @@ class Iceberg:
         else:
             lw_ratio_input = const.DEFAULT_LENGTH_TO_WIDTH_RATIO
 
+        # Surface roughness enhancement applied to the wetted area (default is the
+        # measured value; pass 1.0 for pure smooth geometry).
+        if roughness_factor is None:
+            rf = const.SURFACE_ROUGHNESS_FACTOR
+        else:
+            if roughness_factor <= 0:
+                raise ValueError(f"roughness_factor must be positive, got {roughness_factor}")
+            rf = float(roughness_factor)
+
         # Waterline footprint area used to convert sail volume -> freeboard height.
         # When the volume is calibrated to the footprint-area law, this must be the
         # real (rounded) waterline footprint, not the L x W rectangle -- otherwise
@@ -1003,8 +1041,7 @@ class Iceberg:
                 ice['dz'] = xr.DataArray(data=dz_val, name='dz')
                 ice['dzk'] = xr.DataArray(data=dzk, name='dzk')
                 
-                ice['wettedA'] = xr.DataArray(
-                    data=self._wetted_surface_area(ice, dz_val), name='wettedA')
+                ice = self._add_surface_area(ice, dz_val, rf)
                 ice = self._assign_variable_attrs(ice)
                 return ice
         
@@ -1043,8 +1080,7 @@ class Iceberg:
                 ice['dz'] = xr.DataArray(data=dz_val, name='dz')
                 ice['dzk'] = xr.DataArray(data=dzk, name='dzk')
                 
-                ice['wettedA'] = xr.DataArray(
-                    data=self._wetted_surface_area(ice, dz_val), name='wettedA')
+                ice = self._add_surface_area(ice, dz_val, rf)
                 ice = self._assign_variable_attrs(ice)
                 return ice
             
@@ -1085,8 +1121,7 @@ class Iceberg:
                 if EC < self.STABILITY_THRESHOLD:
                     raise Exception("Still unstable, check W/H ratios")
 
-                ice['wettedA'] = xr.DataArray(
-                    data=self._wetted_surface_area(ice, dz_val), name='wettedA')
+                ice = self._add_surface_area(ice, dz_val, rf)
                 ice = self._assign_variable_attrs(ice)
                 return ice
 

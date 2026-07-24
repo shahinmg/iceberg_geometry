@@ -75,6 +75,20 @@ AREA_VOLUME_EXPONENT = 1.31     # x  (Schild et al. 2021; Sulak 1.30)
 # two Schild drone footprints: 0.66, 0.70), converting model L x W to real area.
 FOOTPRINT_SHAPE_FACTOR = 0.68
 
+# Surface roughness enhancement of the wetted area: true (rough) surface area /
+# smooth-geometry surface area. Real ice is crevassed and ridged, so its area
+# exceeds that of a smooth shape. The value 1.18 is the mean measured 3-D-
+# surface-to-plan-area ratio at ~1 m grid scale over the three complete Schild
+# et al. (2021) drone surveys (Iceberg A t1: 1.19; Iceberg B t1: 1.17, t2: 1.17;
+# consistent with their Table 1 SA_above / footprint). The factor is remarkably
+# consistent between the two bergs (~2% spread), so it transfers across bergs.
+# Applying it to the smooth model brings the calibrated wetted area within ~6%
+# of the measured submerged surface area for both Schild icebergs. CAVEATS:
+# roughness area is scale-dependent -- it grows at finer resolution (~1.05 at
+# 8 m, ~1.18 at 1 m) -- and it is measured above-water and assumed to also apply
+# to the submerged surface.
+SURFACE_ROUGHNESS_FACTOR = 1.18
+
 # Model depth discretization
 DEFAULT_LAYER_THICKNESS_DZ = 5     # meters - default vertical layer thickness
 ALTERNATIVE_LAYER_THICKNESS = 10   # meters - alternative layer thickness
