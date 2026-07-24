@@ -765,7 +765,8 @@ class Iceberg:
         return icebergs
 
     def init_iceberg_size(self, stability_method='equal', quiet=True,
-                          keel_method='barker', volume_law=None, area=None):
+                          keel_method='barker', volume_law=None, area=None,
+                          width=None):
         """
         Initialize complete iceberg geometry and ensure hydrostatic stability.
         
@@ -803,6 +804,16 @@ class Iceberg:
             -- exactly Sulak et al.'s input -- instead of estimating A from length
             via FOOTPRINT_SHAPE_FACTOR. Length is still used for keel depth and the
             cross-section profile. Must be positive. Default None.
+        width : float, optional
+            Observed waterline width (m). When given, the length-to-width ratio
+            is set to ``length / width`` instead of the Dowdeswell default
+            (1.62). This affects only the *width geometry* (``uwW`` and waterline
+            ``W``): it does not change the calibrated total volume, which is
+            area-driven, nor the freeboard when a measured ``area`` is supplied.
+            Useful for near-equant bergs (e.g. L:W ~ 1.1) whose width the 1.62
+            ratio would otherwise underestimate. Note the 'equal' stability
+            method may still widen an unstable berg beyond this width. Must be
+            positive. Default None (use the 1.62 ratio).
 
         Returns
         -------
@@ -887,6 +898,18 @@ class Iceberg:
             if area <= 0:
                 raise ValueError(f"area must be positive, got {area}")
 
+        # Waterline width: use the observed width if given, otherwise the
+        # Dowdeswell default L:W ratio. Width does not affect the calibrated
+        # total volume (area-driven) -- only the width geometry (uwW, W) and the
+        # uncalibrated freeboard. The 'equal' stability method may still override
+        # this by widening an unstable berg.
+        if width is not None:
+            if width <= 0:
+                raise ValueError(f"width must be positive, got {width}")
+            lw_ratio_input = self.length / float(width)
+        else:
+            lw_ratio_input = const.DEFAULT_LENGTH_TO_WIDTH_RATIO
+
         # Waterline footprint area used to convert sail volume -> freeboard height.
         # When the volume is calibrated to the footprint-area law, this must be the
         # real (rounded) waterline footprint, not the L x W rectangle -- otherwise
@@ -902,16 +925,16 @@ class Iceberg:
 
         keel_depth = self.keeldepth(method=keel_method)
         
-        # now get underwater shape, based on Barker for K<200, tabular for K>200, and 
-        ice = self.barker_carea(keel_depth, dz_val, volume_law=volume_law, area=area) # LWratio = 1.62 this gives you uwL, uwW, uwV, uwM, and vector Z down to keel depth
-        
+        # now get underwater shape, based on Barker for K<200, tabular for K>200, and
+        ice = self.barker_carea(keel_depth, dz_val, LWratio=lw_ratio_input, volume_law=volume_law, area=area) # this gives you uwL, uwW, uwV, uwM, and vector Z down to keel depth
+
         # from underwater volume, calculate above water volume
         density_ratio = const.DENSITY_RATIO_ICE_TO_WATER  # ratio of ice density to water density
-        
+
         total_volume = (1/density_ratio) * np.nansum(ice.uwV,axis=0) #double check axis need rows, ~87% of ice underwater
         sail_volume = total_volume - np.nansum(ice.uwV,axis=0) # sail volume is above water volune
-        
-        waterline_width = self.length / const.DEFAULT_LENGTH_TO_WIDTH_RATIO
+
+        waterline_width = self.length / lw_ratio_input
         freeB = sail_volume / _footprint_area(waterline_width) # Freeboard height
         # length = L.copy()
         thickness = keel_depth + freeB # total thickness
@@ -949,10 +972,10 @@ class Iceberg:
                 diff_thick_width = thickness - waterline_width # Get stable thickness
                 keel_new = keel_depth - density_ratio * diff_thick_width # change by percent of difference
                 
-                ice = self.barker_carea(keel_new, dz_val, volume_law=volume_law, area=area)
+                ice = self.barker_carea(keel_new, dz_val, LWratio=lw_ratio_input, volume_law=volume_law, area=area)
                 total_volume = (1/density_ratio) * np.nansum(ice.uwV,axis=0) #double check axis need rows, ~87% of ice underwater
                 sail_volume = total_volume - np.nansum(ice.uwV,axis=0) # sail volume is above water volune
-                waterline_width = self.length / const.DEFAULT_LENGTH_TO_WIDTH_RATIO 
+                waterline_width = self.length / lw_ratio_input
                 freeB = sail_volume / _footprint_area(waterline_width) # Freeboard height
                 # length = L.copy()
                 thickness = keel_depth + freeB # total thickness
