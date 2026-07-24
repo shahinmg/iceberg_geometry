@@ -151,6 +151,16 @@ class Iceberg:
             "units": "m3",
             "description": "Above-water (sail) volume of the iceberg.",
         },
+        "wettedA": {
+            "long_name": "Wetted (submerged) surface area",
+            "units": "m2",
+            "description": "Submerged surface area (lateral walls plus basal footprint) "
+                           "estimated from the per-layer length/width as a smooth stack "
+                           "of rectangular slabs. A LOWER BOUND on the true wetted area: "
+                           "it excludes surface roughness, which Schild et al. (2021) "
+                           "find makes real icebergs 22-43% larger in area than idealized "
+                           "shapes. Relevant to submarine melt (melt scales with area).",
+        },
         "W": {
             "long_name": "Waterline width",
             "units": "m",
@@ -192,6 +202,42 @@ class Iceberg:
             "description": "Thickness of the partial layer at the keel.",
         },
     }
+
+    def _wetted_surface_area(self, ice, dz):
+        """Submerged (wetted) surface area of the iceberg: lateral walls + basal.
+
+        Treats the iceberg as a stack of rectangular slabs, one per underwater
+        layer: the lateral area is the sum of each layer's perimeter times its
+        thickness, plus the basal (bottom) footprint of the deepest layer. The
+        waterline top face is not counted (it is not wetted).
+
+        This is a smooth-geometry estimate and a LOWER BOUND on the true wetted
+        area -- it uses the bounding length/width of each layer and ignores
+        surface roughness, which Schild et al. (2021) show can make real
+        icebergs 22-43% larger in area than idealized shapes.
+
+        Parameters
+        ----------
+        ice : xarray.Dataset
+            Geometry with per-layer ``uwL`` and ``uwW`` (m).
+        dz : float
+            Layer thickness (m).
+
+        Returns
+        -------
+        float
+            Wetted surface area (m^2).
+        """
+        uwL = np.asarray(ice['uwL'].values, dtype=float).ravel()
+        uwW = np.asarray(ice['uwW'].values, dtype=float).ravel()
+        mask = ~np.isnan(uwL) & ~np.isnan(uwW)
+        if not np.any(mask):
+            return 0.0
+        L = uwL[mask]
+        W = uwW[mask]
+        lateral = float(np.sum(2.0 * (L + W)) * dz)  # sum of perimeter * layer thickness
+        basal = float(L[-1] * W[-1])                 # bottom footprint of the keel layer
+        return lateral + basal
 
     def _assign_variable_attrs(self, ds):
         """Attach descriptive attrs (long_name, units, description) to a dataset.
@@ -957,6 +1003,8 @@ class Iceberg:
                 ice['dz'] = xr.DataArray(data=dz_val, name='dz')
                 ice['dzk'] = xr.DataArray(data=dzk, name='dzk')
                 
+                ice['wettedA'] = xr.DataArray(
+                    data=self._wetted_surface_area(ice, dz_val), name='wettedA')
                 ice = self._assign_variable_attrs(ice)
                 return ice
         
@@ -995,6 +1043,8 @@ class Iceberg:
                 ice['dz'] = xr.DataArray(data=dz_val, name='dz')
                 ice['dzk'] = xr.DataArray(data=dzk, name='dzk')
                 
+                ice['wettedA'] = xr.DataArray(
+                    data=self._wetted_surface_area(ice, dz_val), name='wettedA')
                 ice = self._assign_variable_attrs(ice)
                 return ice
             
@@ -1035,6 +1085,8 @@ class Iceberg:
                 if EC < self.STABILITY_THRESHOLD:
                     raise Exception("Still unstable, check W/H ratios")
 
+                ice['wettedA'] = xr.DataArray(
+                    data=self._wetted_surface_area(ice, dz_val), name='wettedA')
                 ice = self._assign_variable_attrs(ice)
                 return ice
 
