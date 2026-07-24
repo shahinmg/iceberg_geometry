@@ -7,12 +7,11 @@ circumnavigation scans, Iceberg A survey 2 and Iceberg B survey 1:
     A2:  12.3e5 - 3.14e5 = 9.16e5 m^2
     B1:   8.52e5 - 1.91e5 = 6.61e5 m^2
 
-These tests document a deliberate tension: the volume calibration
-(``volume_law='sulak'``) was tuned to reproduce the measured *volume*, but it
-shrinks the geometry, which *reduces* the wetted surface area and drives it
-below the measurement. Volume and surface area cannot both be matched by a
-single smooth shrink (volume ~ size^3, area ~ size^2). See ``wettedA`` in
-init_iceberg_size, which is itself a smooth lower bound (no roughness).
+The model's ``wettedA`` is a smooth stack-of-slabs area (lateral walls + basal)
+multiplied by a ``roughness`` factor (default SURFACE_ROUGHNESS_FACTOR = 1.18,
+the mean drone enhancement at ~1 m scale over the three complete Schild surveys).
+With the calibrated geometry this lands within ~7% of the measured submerged area
+for both bergs; the smooth area alone (roughness_factor=1.0) underestimates it.
 
 Run standalone (no pytest needed):  python tests/test_surface_area.py
 """
@@ -32,45 +31,56 @@ def _base(length):
     )
 
 
-def _calibrated(length, area):
+def _calibrated(length, area, roughness_factor=None):
     return Iceberg(length=length, dz=5).init_iceberg_size(
-        keel_method="schild", volume_law="sulak", area=area
+        keel_method="schild", volume_law="sulak", area=area,
+        roughness_factor=roughness_factor,
     )
 
 
-def test_wettedA_present_and_positive():
-    """Every geometry dataset carries a positive wetted-area variable with metadata."""
-    for name, (length, area, _sa) in MEASURED_SA.items():
+def test_wettedA_and_roughness_present():
+    """Datasets carry a positive wetted area and the roughness factor (default 1.19)."""
+    for name, (length, area, _) in MEASURED_SA.items():
         ds = _calibrated(length, area)
         assert "wettedA" in ds.variables, f"{name}: wettedA missing"
+        assert "roughness" in ds.variables, f"{name}: roughness missing"
         assert float(ds.wettedA) > 0.0, f"{name}: wettedA not positive"
+        assert abs(float(ds.roughness) - 1.18) < 1e-9, f"{name}: default roughness != 1.18"
         assert ds.wettedA.attrs.get("units") == "m2", f"{name}: wettedA units wrong"
+
+
+def test_roughness_factor_scales_area_linearly():
+    """wettedA scales linearly with the roughness factor; 1.0 gives the smooth area."""
+    length, area, _ = MEASURED_SA["A_survey2"]
+    smooth = _calibrated(length, area, roughness_factor=1.0)
+    rough = _calibrated(length, area, roughness_factor=1.3)
+    assert abs(float(smooth.roughness) - 1.0) < 1e-9
+    assert abs(float(rough.wettedA) / float(smooth.wettedA) - 1.3) < 1e-9
+
+
+def test_calibrated_surface_area_matches_measured():
+    """With the default roughness factor, calibrated wetted area is within 15% of
+    the measured submerged surface area (actual: A2 1.05x, B1 0.93x)."""
+    for name, (length, area, sa_meas) in MEASURED_SA.items():
+        ratio = float(_calibrated(length, area).wettedA) / sa_meas
+        assert 0.85 < ratio < 1.15, f"{name}: wettedA/measured {ratio:.2f} outside 15%"
+
+
+def test_smooth_area_underestimates_measured():
+    """Without roughness (factor=1.0) the smooth calibrated area falls below
+    measured -- reproducing the idealized-geometry underestimate Schild warn of."""
+    for name, (length, area, sa_meas) in MEASURED_SA.items():
+        ratio = float(_calibrated(length, area, roughness_factor=1.0).wettedA) / sa_meas
+        assert ratio < 1.0, f"{name}: smooth wettedA/measured {ratio:.2f} should be < 1"
 
 
 def test_calibration_reduces_surface_area():
     """The volume calibration shrinks the geometry, so wetted area drops vs the
-    base prism -- the core volume-vs-area tension."""
-    for name, (length, area, _sa) in MEASURED_SA.items():
+    base prism (compared at the same roughness) -- the core volume-vs-area tension."""
+    for name, (length, area, _) in MEASURED_SA.items():
         base = float(_base(length).wettedA)
         cal = float(_calibrated(length, area).wettedA)
         assert cal < base, f"{name}: calibrated wettedA {cal:.2e} !< base {base:.2e}"
-
-
-def test_calibrated_surface_area_underestimates_measured():
-    """Calibrated wetted area lands below the measured submerged surface area
-    (~0.79-0.89x) -- reproducing the idealized-geometry underestimate Schild
-    et al. warn about. Encoded as a documented band, not an accuracy target."""
-    for name, (length, area, sa_meas) in MEASURED_SA.items():
-        ratio = float(_calibrated(length, area).wettedA) / sa_meas
-        assert 0.65 < ratio < 1.0, f"{name}: wettedA/measured {ratio:.2f} outside expected band"
-
-
-def test_base_prism_surface_area_in_range():
-    """The un-calibrated box is roughly the right *area* (0.8-1.4x) even though
-    its volume is ~2x too big -- the flip side of the tension."""
-    for name, (length, area, sa_meas) in MEASURED_SA.items():
-        ratio = float(_base(length).wettedA) / sa_meas
-        assert 0.8 < ratio < 1.4, f"{name}: base wettedA/measured {ratio:.2f} outside expected band"
 
 
 if __name__ == "__main__":
