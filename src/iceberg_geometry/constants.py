@@ -39,12 +39,7 @@ CONSTANT_KEEL_RATIO = 0.7     # Simple proportional keel depth: K = 0.7 * L
 BARKER_HOTZEL_THRESHOLD = 160  # Meters - switch from Barker to Hotzel at this length
 
 # Schild et al. (2021) - Sermilik Fjord large-iceberg keel depth: K = L / ratio.
-# The surface-length-to-keel-depth ratio is ~2:1 (Schild et al. 2021, GRL,
-# doi:10.1029/2020GL089765, Results; reported as consistent with the range from
-# earlier multibeam work, Barker et al. 1999). The value below is the mean L/keel
-# over the four Schild surveys (Table 1: 1.90, 1.94, 2.03, 2.05). Calibrated on
-# two deep-keeled Sermilik icebergs (L ~ 500-730 m) -- valid for LARGE icebergs
-# only; Barker's sub-linear law is more appropriate for small bergs.
+# Barker's sub-linear law is more appropriate for small bergs.
 SCHILD_LENGTH_TO_KEEL_RATIO = 1.98   # L / keel depth (dimensionless)
 SCHILD_MIN_LENGTH = 400              # m - below this, warn: outside calibration range
 
@@ -71,23 +66,36 @@ DEFAULT_LENGTH_TO_WIDTH_RATIO = 1.62  # Typical L:W ratio for Greenland icebergs
 # Waterline-footprint-area to total-volume relation: V_total = c * A^x.
 AREA_VOLUME_COEFFICIENT = 6.0   # c in V_total = c * A^x  (Sulak et al. 2017)
 AREA_VOLUME_EXPONENT = 1.31     # x  (Schild et al. 2021; Sulak 1.30)
-# Waterline footprint fills ~0.68 of its L x W bounding rectangle (mean over the
-# two Schild drone footprints: 0.66, 0.70), converting model L x W to real area.
-FOOTPRINT_SHAPE_FACTOR = 0.68
 
-# Surface roughness enhancement of the wetted area: true (rough) surface area /
-# smooth-geometry surface area. Real ice is crevassed and ridged, so its area
-# exceeds that of a smooth shape. The value 1.18 is the mean measured 3-D-
-# surface-to-plan-area ratio at ~1 m grid scale over the three complete Schild
-# et al. (2021) drone surveys (Iceberg A t1: 1.19; Iceberg B t1: 1.17, t2: 1.17;
-# consistent with their Table 1 SA_above / footprint). The factor is remarkably
-# consistent between the two bergs (~2% spread), so it transfers across bergs.
-# Applying it to the smooth model brings the calibrated wetted area within ~6%
-# of the measured submerged surface area for both Schild icebergs. CAVEATS:
-# roughness area is scale-dependent -- it grows at finer resolution (~1.05 at
-# 8 m, ~1.18 at 1 m) -- and it is measured above-water and assumed to also apply
-# to the submerged surface.
-SURFACE_ROUGHNESS_FACTOR = 1.18
+FOOTPRINT_SHAPE_OBSERVATIONS = {
+    "Schild2021_IcebergA": 0.66,   # drone-measured plan area
+    "Schild2021_IcebergB": 0.70,   # drone-measured plan area
+    "Schild2024_SF0419": 0.58,     # inferred from mesh volume via V = c * A^x
+}
+# Accuracy note: the 3-berg mean (0.65) from Schild 2021, 2024
+FOOTPRINT_SHAPE_FACTOR = round(
+    sum(FOOTPRINT_SHAPE_OBSERVATIONS.values()) / len(FOOTPRINT_SHAPE_OBSERVATIONS), 2
+)  # 0.65
+
+
+# Drone-cloud roughness (3-D DEM area / plan area) at ~1 m grid scale, measured on
+# the Schild et al. (2021) point clouds in this repo.
+SURFACE_ROUGHNESS_OBSERVATIONS = {
+    "Schild2021_IcebergA_t1": 1.190,
+    "Schild2021_IcebergB_t1": 1.171,
+    "Schild2021_IcebergB_t2": 1.167,
+}
+# The 3-survey mean (1.18). OPT-IN, not the default: it is a scale-dependent
+# enhancement measured on three bergs, too berg-specific to justify applying to
+# whole-dataframe sweeps. Pass roughness_factor=SURFACE_ROUGHNESS_OBSERVED when
+# comparing against meshed surface areas.
+SURFACE_ROUGHNESS_OBSERVED = round(
+    sum(SURFACE_ROUGHNESS_OBSERVATIONS.values()) / len(SURFACE_ROUGHNESS_OBSERVATIONS), 2
+)  # 1.18
+
+# Default: smooth stack-of-slabs geometry, no roughness enhancement. This makes
+# wettedA a documented LOWER BOUND rather than a tuned estimate.
+SURFACE_ROUGHNESS_FACTOR = 1.0
 
 # Model depth discretization
 DEFAULT_LAYER_THICKNESS_DZ = 5     # meters - default vertical layer thickness
@@ -136,6 +144,18 @@ def validate_constants():
 
     # Stability check
     assert 0.9 < STABILITY_THRESHOLD_WH < 1.0, "Stability threshold should be ~0.92"
+
+    # Footprint fill must be a fraction of the bounding rectangle
+    assert 0 < FOOTPRINT_SHAPE_FACTOR <= 1, (
+        f"Footprint shape factor should be in (0, 1]: {FOOTPRINT_SHAPE_FACTOR}")
+    assert all(0 < v <= 1 for v in FOOTPRINT_SHAPE_OBSERVATIONS.values()), (
+        "Each footprint observation should be in (0, 1]")
+
+    # Roughness can only add area; the default stays smooth (opt in explicitly)
+    assert SURFACE_ROUGHNESS_FACTOR == 1.0, (
+        f"Default roughness should be smooth (1.0): {SURFACE_ROUGHNESS_FACTOR}")
+    assert all(v >= 1 for v in SURFACE_ROUGHNESS_OBSERVATIONS.values()), (
+        "Each roughness observation should be >= 1 (roughness only adds area)")
 
     print("✓ All constants validated successfully")
 
