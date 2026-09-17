@@ -13,6 +13,8 @@ dependencies = [
     "xarray",
     "scikit-learn",
     "matplotlib",
+    "shapely",
+    "geopandas",
 ]
 
 [tool.setuptools.packages.find]
