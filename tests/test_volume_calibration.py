@@ -1,17 +1,5 @@
 """Validate the Sermilik keel/volume calibration against Schild et al. (2021).
 
-Reference geometry for the two large Sermilik Fjord icebergs comes from Schild
-et al. (2021), GRL, doi:10.1029/2020GL089765, Table 1 (surface length, keel
-depth, projected total volume). The waterline *footprint* area is not tabulated
-there -- Table 1's ``SA_above`` is a 3-D above-water surface area, not a plan
-footprint -- so the areas below are the convex-hull plan area of the published
-drone point clouds (this repo's point-cloud tooling, decimated 50x).
-
-These checks confirm that ``keel_method='schild'`` + ``volume_law='sulak'``
-reproduces the measured keel depth and total volume for the deep tabular berg
-(Iceberg A), and they document that the small, near-equant berg (Iceberg B)
-sits ~30% above the volume law -- a known limitation, not a target.
-
 Run standalone (no pytest needed):  python tests/test_volume_calibration.py
 Or, if pytest is installed:          pytest tests/test_volume_calibration.py
 """
@@ -55,7 +43,8 @@ def test_iceberg_A_volume_within_15pct():
 
 
 def test_proxy_area_matches_A_without_measurement():
-    """The 0.68*L*W fallback (no measured area) stays within 20% of measured V for A."""
+    """The footprint_factor*L*W fallback (no measured area) stays within 20% of
+    measured V for A."""
     for name in ("A_survey1", "A_survey2"):
         length, _, _, v_meas = MEASURED[name]
         ds = Iceberg(length=length, dz=5).init_iceberg_size(

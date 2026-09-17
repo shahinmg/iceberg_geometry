@@ -8,15 +8,20 @@ circumnavigation scans, Iceberg A survey 2 and Iceberg B survey 1:
     B1:   8.52e5 - 1.91e5 = 6.61e5 m^2
 
 The model's ``wettedA`` is a smooth stack-of-slabs area (lateral walls + basal)
-multiplied by a ``roughness`` factor (default SURFACE_ROUGHNESS_FACTOR = 1.18,
-the mean drone enhancement at ~1 m scale over the three complete Schild surveys).
-With the calibrated geometry this lands within ~7% of the measured submerged area
-for both bergs; the smooth area alone (roughness_factor=1.0) underestimates it.
+multiplied by a ``roughness`` factor. The DEFAULT is smooth (1.0), which
+underestimates the measured area -- roughness is opt-in, because the measured
+enhancement is scale-dependent and known from only three bergs. Opting in with
+``roughness_factor=SURFACE_ROUGHNESS_OBSERVED`` (1.18, the mean drone enhancement
+at ~1 m scale over the three complete Schild surveys) lands within ~7% of the
+measured submerged area for both bergs.
 
 Run standalone (no pytest needed):  python tests/test_surface_area.py
 """
 
+import warnings
+
 from iceberg_geometry import Iceberg
+from iceberg_geometry import constants as const
 
 # name -> (surface_length_m, footprint_area_m2, measured_submerged_SA_m2)
 MEASURED_SA = {
@@ -39,13 +44,14 @@ def _calibrated(length, area, roughness_factor=None):
 
 
 def test_wettedA_and_roughness_present():
-    """Datasets carry a positive wetted area and the roughness factor (default 1.19)."""
+    """Datasets carry a positive wetted area and the roughness factor (default smooth)."""
     for name, (length, area, _) in MEASURED_SA.items():
         ds = _calibrated(length, area)
         assert "wettedA" in ds.variables, f"{name}: wettedA missing"
         assert "roughness" in ds.variables, f"{name}: roughness missing"
         assert float(ds.wettedA) > 0.0, f"{name}: wettedA not positive"
-        assert abs(float(ds.roughness) - 1.18) < 1e-9, f"{name}: default roughness != 1.18"
+        assert abs(float(ds.roughness) - const.SURFACE_ROUGHNESS_FACTOR) < 1e-9, (
+            f"{name}: default roughness != {const.SURFACE_ROUGHNESS_FACTOR}")
         assert ds.wettedA.attrs.get("units") == "m2", f"{name}: wettedA units wrong"
 
 
@@ -62,7 +68,7 @@ def test_basalA_present_and_within_smooth_total():
 
 
 def test_footprint_factor_uses_measured_area():
-    """footprint_factor = measured area/(L*W) when area is given, else 0.68."""
+    """footprint_factor = measured area/(L*W) when area is given, else the default."""
     length, area, _ = MEASURED_SA["A_survey2"]
     with_area = _calibrated(length, area)
     expected = area / (length * (length / 1.62))
@@ -70,7 +76,98 @@ def test_footprint_factor_uses_measured_area():
     # without measured area -> default FOOTPRINT_SHAPE_FACTOR
     no_area = Iceberg(length=length, dz=5).init_iceberg_size(
         keel_method="schild", volume_law="sulak")
-    assert abs(float(no_area.footprint_factor) - 0.68) < 1e-9
+    assert abs(float(no_area.footprint_factor)
+               - const.FOOTPRINT_SHAPE_FACTOR) < 1e-9
+
+
+def test_footprint_factor_kwarg_overrides_default():
+    """An explicit footprint_factor replaces FOOTPRINT_SHAPE_FACTOR in the
+    length-to-area proxy, and is reported back on the dataset."""
+    length, _, _ = MEASURED_SA["A_survey2"]
+    for ff in (0.58, 0.70):
+        ds = Iceberg(length=length, dz=5).init_iceberg_size(
+            keel_method="schild", volume_law="sulak", footprint_factor=ff)
+        assert abs(float(ds.footprint_factor) - ff) < 1e-9, f"ff={ff} not reported"
+    # V = c*A^x with A proportional to the factor, so volume scales as ff^x
+    lo = Iceberg(length=length, dz=5).init_iceberg_size(
+        keel_method="schild", volume_law="sulak", footprint_factor=0.58)
+    hi = Iceberg(length=length, dz=5).init_iceberg_size(
+        keel_method="schild", volume_law="sulak", footprint_factor=0.70)
+    expected_ratio = (0.70 / 0.58) ** const.AREA_VOLUME_EXPONENT
+    actual_ratio = float(hi.totalV) / float(lo.totalV)
+    assert abs(actual_ratio / expected_ratio - 1.0) < 0.02, (
+        f"volume ratio {actual_ratio:.3f} != expected {expected_ratio:.3f}")
+
+
+def test_footprint_factor_guards():
+    """footprint_factor must be a fraction, and cannot be combined with area."""
+    length, area, _ = MEASURED_SA["A_survey2"]
+
+    def _call(**kw):
+        return Iceberg(length=length, dz=5).init_iceberg_size(
+            keel_method="schild", volume_law="sulak", **kw)
+
+    for bad in (0.0, -0.1, 1.5):
+        try:
+            _call(footprint_factor=bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"footprint_factor={bad} should raise ValueError")
+    try:
+        _call(area=area, footprint_factor=0.6)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("area + footprint_factor together should raise ValueError")
+
+
+def test_perimeter_scales_lateral_area_only():
+    """A measured perimeter shortens the lateral walls without touching the
+    area-driven quantities (volume, freeboard) or the basal footprint."""
+    length, area, _ = MEASURED_SA["A_survey2"]
+    base = _calibrated(length, area)
+    width = length / 1.62
+    factor = 0.829  # drone-measured hull perimeter / bounding-rectangle perimeter
+    ds = Iceberg(length=length, dz=5).init_iceberg_size(
+        keel_method="schild", volume_law="sulak", area=area,
+        perimeter=factor * 2.0 * (length + width))
+
+    assert abs(float(base.perimeter_factor) - 1.0) < 1e-9, "default should be the rectangle"
+    assert abs(float(ds.perimeter_factor) - factor) < 1e-9
+    assert abs(float(ds.totalV) - float(base.totalV)) < 1.0, "volume must not change"
+    assert abs(float(ds.freeB) - float(base.freeB)) < 1e-9, "freeboard must not change"
+    assert abs(float(ds.basalA) - float(base.basalA)) < 1e-6, "basal area must not change"
+
+    # only the lateral term is scaled, so wettedA falls by less than `factor`
+    smooth_base = float(base.wettedA) / float(base.roughness)
+    lateral = smooth_base - float(base.basalA)
+    expected = (lateral * factor + float(base.basalA)) * float(base.roughness)
+    assert abs(float(ds.wettedA) / expected - 1.0) < 1e-9, (
+        f"wettedA {float(ds.wettedA):.4e} != expected {expected:.4e}")
+
+
+def test_ragged_perimeter_warns():
+    """A perimeter longer than its own bounding rectangle means an unsimplified
+    outline whose raggedness roughness already covers -- warn, don't silently use it."""
+    length, area, _ = MEASURED_SA["A_survey2"]
+    rect = 2.0 * (length + length / 1.62)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        ds = Iceberg(length=length, dz=5).init_iceberg_size(
+            keel_method="schild", volume_law="sulak", area=area, perimeter=1.2 * rect)
+    assert any("bounding-rectangle" in str(w.message) for w in caught), (
+        "expected a warning for perimeter_factor > 1")
+    assert abs(float(ds.perimeter_factor) - 1.2) < 1e-9, "factor still applied"
+
+    for bad in (0.0, -10.0):
+        try:
+            Iceberg(length=length, dz=5).init_iceberg_size(
+                keel_method="schild", volume_law="sulak", area=area, perimeter=bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"perimeter={bad} should raise ValueError")
 
 
 def test_roughness_factor_scales_area_linearly():
@@ -83,10 +180,16 @@ def test_roughness_factor_scales_area_linearly():
 
 
 def test_calibrated_surface_area_matches_measured():
-    """With the default roughness factor, calibrated wetted area is within 15% of
-    the measured submerged surface area (actual: A2 1.05x, B1 0.93x)."""
+    """Opting in to the measured roughness (1.18), calibrated wetted area is within
+    15% of the measured submerged surface area (actual: A2 1.05x, B1 0.93x).
+
+    Passed explicitly, not taken from the default: the default is smooth, so this
+    is a statement about what the geometry CAN reproduce, not about sweep output.
+    """
     for name, (length, area, sa_meas) in MEASURED_SA.items():
-        ratio = float(_calibrated(length, area).wettedA) / sa_meas
+        ds = _calibrated(length, area,
+                         roughness_factor=const.SURFACE_ROUGHNESS_OBSERVED)
+        ratio = float(ds.wettedA) / sa_meas
         assert 0.85 < ratio < 1.15, f"{name}: wettedA/measured {ratio:.2f} outside 15%"
 
 

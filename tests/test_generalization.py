@@ -8,7 +8,10 @@ notes:
 
   * Keel: train the L:keel ratio on ONE berg, predict the OTHER -> within ~7%.
   * Roughness: the measured drone enhancement at ~1 m scale is nearly identical
-    across bergs (A 1.19, B 1.17), so the single default factor is representative.
+    across bergs (A 1.19, B 1.17), so the single documented factor is
+    representative -- though it stays OPT-IN rather than the shipped default,
+    since a 1 m-scale enhancement from three bergs is not justification enough
+    to apply to whole-dataframe sweeps.
 
 Reference numbers are from Schild et al. (2021) Table 1 (lengths, keels) and from
 the drone-cloud roughness measurement in this repo (3-D area / plan area at 1 m
@@ -71,12 +74,23 @@ def test_roughness_consistent_across_bergs():
     assert spread < 0.05, f"roughness spread {spread:.3f} across bergs is too large"
 
 
-def test_default_roughness_is_survey_mean():
-    """The shipped roughness factor (1.18) is the mean of the drone surveys."""
+def test_observed_roughness_is_survey_mean():
+    """The documented opt-in roughness (1.18) is the mean of the drone surveys."""
     mean_rough = sum(ROUGHNESS_1M.values()) / len(ROUGHNESS_1M)
-    assert abs(const.SURFACE_ROUGHNESS_FACTOR - mean_rough) < 0.01, (
-        f"constant {const.SURFACE_ROUGHNESS_FACTOR} vs survey mean {mean_rough:.3f}"
+    assert abs(const.SURFACE_ROUGHNESS_OBSERVED - mean_rough) < 0.01, (
+        f"constant {const.SURFACE_ROUGHNESS_OBSERVED} vs survey mean {mean_rough:.3f}"
     )
+
+
+def test_default_roughness_is_smooth():
+    """The SHIPPED DEFAULT is smooth (1.0), not the measured 1.18.
+
+    The enhancement is scale-dependent and measured on three bergs, so it is too
+    berg-specific to apply to whole-dataframe sweeps; wettedA is therefore a
+    documented lower bound unless the caller opts in with roughness_factor=.
+    """
+    assert const.SURFACE_ROUGHNESS_FACTOR == 1.0, (
+        f"default roughness should be 1.0, got {const.SURFACE_ROUGHNESS_FACTOR}")
 
 
 if __name__ == "__main__":
