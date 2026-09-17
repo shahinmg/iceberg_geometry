@@ -161,6 +161,27 @@ class Iceberg:
                            "(Schild et al. 2021). The smooth-geometry area is wettedA / "
                            "roughness. Relevant to submarine melt (melt scales with area).",
         },
+        "basalA": {
+            "long_name": "Basal (keel bottom) footprint area",
+            "units": "m2",
+            "description": "Plan-view area of the flat bottom face at the keel (deepest "
+                           "layer length x width) -- the horizontal 'floor' of the "
+                           "iceberg, for basal melt / heat flux at the keel. Smooth "
+                           "bounding-box footprint with roughness NOT applied: multiply by "
+                           "'roughness' for the rough area, and by 'footprint_factor' for "
+                           "the rounded plan footprint (uses the measured area when "
+                           "supplied instead of the default 0.68). Note the basal melt "
+                           "rate is typically lower than the lateral wall melt rate.",
+        },
+        "footprint_factor": {
+            "long_name": "Waterline footprint fill fraction",
+            "units": "1",
+            "description": "Real plan-view footprint area divided by the L*W bounding "
+                           "rectangle. Equals measured area/(L*W) when `area` is supplied, "
+                           "otherwise FOOTPRINT_SHAPE_FACTOR (~0.68). Multiply basalA (or "
+                           "any bounding-box plan area) by this for the rounded footprint. "
+                           "For equant bergs pass `width` too so L*W is physical.",
+        },
         "roughness": {
             "long_name": "Surface roughness enhancement factor",
             "units": "1",
@@ -235,29 +256,35 @@ class Iceberg:
 
         Returns
         -------
-        float
-            Wetted surface area (m^2).
+        (float, float)
+            ``(lateral, basal)`` smooth surface areas in m^2: the side-wall area
+            (sum of perimeter * layer thickness) and the keel bottom footprint.
         """
         uwL = np.asarray(ice['uwL'].values, dtype=float).ravel()
         uwW = np.asarray(ice['uwW'].values, dtype=float).ravel()
         mask = ~np.isnan(uwL) & ~np.isnan(uwW)
         if not np.any(mask):
-            return 0.0
+            return 0.0, 0.0
         L = uwL[mask]
         W = uwW[mask]
         lateral = float(np.sum(2.0 * (L + W)) * dz)  # sum of perimeter * layer thickness
         basal = float(L[-1] * W[-1])                 # bottom footprint of the keel layer
-        return lateral + basal
+        return lateral, basal
 
-    def _add_surface_area(self, ice, dz, roughness_factor):
+    def _add_surface_area(self, ice, dz, roughness_factor, footprint_factor):
         """Add wetted-surface-area variables to a geometry dataset.
 
-        Stores ``wettedA`` (smooth geometric area times the roughness factor) and
-        ``roughness`` (the factor used). The smooth area is recoverable as
-        ``wettedA / roughness``.
+        Stores ``wettedA`` (smooth lateral+basal area times the roughness factor),
+        ``basalA`` (the smooth keel bottom bounding-box footprint, roughness NOT
+        applied), ``footprint_factor`` (real-footprint / L*W fill fraction) and
+        ``roughness`` (the factor used). The smooth total area is recoverable as
+        ``wettedA / roughness`` = lateral + basalA; the rounded keel footprint is
+        ``footprint_factor * basalA``.
         """
-        smooth = self._wetted_surface_area(ice, dz)
-        ice['wettedA'] = xr.DataArray(data=smooth * roughness_factor, name='wettedA')
+        lateral, basal = self._wetted_surface_area(ice, dz)
+        ice['wettedA'] = xr.DataArray(data=(lateral + basal) * roughness_factor, name='wettedA')
+        ice['basalA'] = xr.DataArray(data=basal, name='basalA')
+        ice['footprint_factor'] = xr.DataArray(data=float(footprint_factor), name='footprint_factor')
         ice['roughness'] = xr.DataArray(data=float(roughness_factor), name='roughness')
         return ice
 
@@ -521,7 +548,7 @@ class Iceberg:
 
 
     def barker_carea(self, keel_depth, dz, LWratio=1.62, tabular=200, method='barker',
-                     volume_law=None, area=None):
+                     volume_law=None, area=None, wall_slope=None):
         """
         Calculate underwater cross-sectional areas and iceberg geometry using Barker et al. 2004 model.
         
@@ -807,7 +834,35 @@ class Iceberg:
                            * const.DENSITY_RATIO_ICE_TO_WATER)
             # rounded-footprint prism volume (no taper): the ceiling to taper from
             prism = shape_factor * float(np.nansum(icebergs['uwV'].values))
-            if prism > 0:
+            if wall_slope is not None:
+                # Surface geometry from the OBSERVED wall undercut angle (Schild et al.
+                # 2024, 3-23 deg) instead of the volume-solved taper: each face recedes
+                # by tan(wall_slope)*z, so uwL/uwW (hence perimeter-vs-depth, side-wall
+                # melt and Q_ib) follow the measured wall shape. uwV is then scaled to
+                # preserve the Sulak-calibrated total volume -- volume and surface
+                # geometry are deliberately decoupled (a single smooth shape cannot match
+                # both the measured volume and the near-vertical observed walls).
+                z = icebergs['Z'].values.astype(float)[:, None]
+                recede = 2.0 * np.tan(np.radians(wall_slope)) * z   # both faces of each dim
+                uwL0 = icebergs['uwL'].values
+                uwW0 = icebergs['uwW'].values
+                with np.errstate(invalid='ignore', divide='ignore'):
+                    taperL = np.where(uwL0 > 0, np.clip((uwL0 - recede) / uwL0, 0.0, 1.0), 1.0)
+                    taperW = np.where(uwW0 > 0, np.clip((uwW0 - recede) / uwW0, 0.0, 1.0), 1.0)
+                icebergs['uwL'] = icebergs['uwL'] * taperL
+                icebergs['uwW'] = icebergs['uwW'] * taperW
+                icebergs['cross_area'] = icebergs['cross_area'] * taperL
+                icebergs['uwV'] = icebergs['uwV'] * shape_factor * taperL * taperW
+                tot = float(np.nansum(icebergs['uwV'].values))
+                if tot > 0:
+                    icebergs['uwV'] = icebergs['uwV'] * (V_uw_target / tot)
+                icebergs.attrs['volume_law'] = (
+                    f"V=c*A^x (c={const.AREA_VOLUME_COEFFICIENT}, "
+                    f"x={const.AREA_VOLUME_EXPONENT}, Sulak 2017/Schild 2021); "
+                    f"A={'measured' if area is not None else 'from length'} "
+                    f"({A_wl:.0f} m^2); surface geometry from wall_slope={wall_slope} deg "
+                    f"undercut (Schild 2024), uwV scaled to preserve calibrated volume")
+            elif prism > 0:
                 # solve 1 - a + a^2/3 = target/prism for the linear-taper param a,
                 # where cross-section width scales (1 - a*z/keel), a in [0, 1]
                 g = min(1.0, max(1.0 / 3.0, V_uw_target / prism))
@@ -834,7 +889,7 @@ class Iceberg:
 
     def init_iceberg_size(self, stability_method='equal', quiet=True,
                           keel_method='barker', volume_law=None, area=None,
-                          width=None, roughness_factor=None):
+                          width=None, roughness_factor=None, wall_slope=None):
         """
         Initialize complete iceberg geometry and ensure hydrostatic stability.
         
@@ -889,6 +944,17 @@ class Iceberg:
             ``SURFACE_ROUGHNESS_FACTOR`` (1.18, mean of the three Schild et al.
             2021 drone surveys at ~1 m scale). Pass 1.0 for the pure smooth area.
             Must be positive.
+        wall_slope : float, optional
+            Observed side-wall undercut angle in degrees (Schild et al. 2024
+            measured 3-23 deg). When given (requires volume_law='sulak'), the
+            underwater length/width taper at this fixed wall angle instead of the
+            volume-solved taper, so uwL/uwW -- and hence perimeter-vs-depth,
+            wetted area and side-wall heat flux (Q_ib) -- follow the *measured*
+            wall geometry. uwV is scaled to preserve the Sulak-calibrated total
+            volume, deliberately decoupling volume from surface geometry. The
+            volume-optimized taper narrows too aggressively at depth and
+            under-represents deep perimeter; ~10 deg (the Schild 2024 mean) is a
+            reasonable default. Default None (use the volume taper).
 
         Returns
         -------
@@ -973,6 +1039,14 @@ class Iceberg:
             if area <= 0:
                 raise ValueError(f"area must be positive, got {area}")
 
+        if wall_slope is not None:
+            if volume_law != 'sulak':
+                raise ValueError(
+                    "wall_slope requires volume_law='sulak' (it sets the surface "
+                    f"geometry while preserving the Sulak volume); got volume_law={volume_law!r}")
+            if wall_slope < 0:
+                raise ValueError(f"wall_slope must be >= 0 degrees, got {wall_slope}")
+
         # Waterline width: use the observed width if given, otherwise the
         # Dowdeswell default L:W ratio. Width does not affect the calibrated
         # total volume (area-driven) -- only the width geometry (uwW, W) and the
@@ -994,6 +1068,16 @@ class Iceberg:
                 raise ValueError(f"roughness_factor must be positive, got {roughness_factor}")
             rf = float(roughness_factor)
 
+        # Effective waterline footprint fill fraction (real footprint / L*W). Uses
+        # the MEASURED `area` when supplied (area / (L*W)), otherwise the default
+        # FOOTPRINT_SHAPE_FACTOR (~0.68). Multiply basalA (or any bounding-box plan
+        # area) by this to get the rounded plan footprint without the hard-coded 0.68.
+        _W_wl = self.length / lw_ratio_input
+        if area is not None:
+            footprint_factor = float(area) / (self.length * _W_wl)
+        else:
+            footprint_factor = const.FOOTPRINT_SHAPE_FACTOR
+
         # Waterline footprint area used to convert sail volume -> freeboard height.
         # When the volume is calibrated to the footprint-area law, this must be the
         # real (rounded) waterline footprint, not the L x W rectangle -- otherwise
@@ -1010,7 +1094,7 @@ class Iceberg:
         keel_depth = self.keeldepth(method=keel_method)
         
         # now get underwater shape, based on Barker for K<200, tabular for K>200, and
-        ice = self.barker_carea(keel_depth, dz_val, LWratio=lw_ratio_input, volume_law=volume_law, area=area) # this gives you uwL, uwW, uwV, uwM, and vector Z down to keel depth
+        ice = self.barker_carea(keel_depth, dz_val, LWratio=lw_ratio_input, volume_law=volume_law, area=area, wall_slope=wall_slope) # this gives you uwL, uwW, uwV, uwM, and vector Z down to keel depth
 
         # from underwater volume, calculate above water volume
         density_ratio = const.DENSITY_RATIO_ICE_TO_WATER  # ratio of ice density to water density
@@ -1041,7 +1125,7 @@ class Iceberg:
                 ice['dz'] = xr.DataArray(data=dz_val, name='dz')
                 ice['dzk'] = xr.DataArray(data=dzk, name='dzk')
                 
-                ice = self._add_surface_area(ice, dz_val, rf)
+                ice = self._add_surface_area(ice, dz_val, rf, footprint_factor)
                 ice = self._assign_variable_attrs(ice)
                 return ice
         
@@ -1057,7 +1141,7 @@ class Iceberg:
                 diff_thick_width = thickness - waterline_width # Get stable thickness
                 keel_new = keel_depth - density_ratio * diff_thick_width # change by percent of difference
                 
-                ice = self.barker_carea(keel_new, dz_val, LWratio=lw_ratio_input, volume_law=volume_law, area=area)
+                ice = self.barker_carea(keel_new, dz_val, LWratio=lw_ratio_input, volume_law=volume_law, area=area, wall_slope=wall_slope)
                 total_volume = (1/density_ratio) * np.nansum(ice.uwV,axis=0) #double check axis need rows, ~87% of ice underwater
                 sail_volume = total_volume - np.nansum(ice.uwV,axis=0) # sail volume is above water volune
                 waterline_width = self.length / lw_ratio_input
@@ -1080,7 +1164,7 @@ class Iceberg:
                 ice['dz'] = xr.DataArray(data=dz_val, name='dz')
                 ice['dzk'] = xr.DataArray(data=dzk, name='dzk')
                 
-                ice = self._add_surface_area(ice, dz_val, rf)
+                ice = self._add_surface_area(ice, dz_val, rf, footprint_factor)
                 ice = self._assign_variable_attrs(ice)
                 return ice
             
@@ -1093,7 +1177,7 @@ class Iceberg:
                 width_temporary = self.STABILITY_THRESHOLD * thickness[0]
                 lw_ratio = np.floor((100*self.length)/width_temporary)/100 # round down to hundredth place
                 
-                ice = self.barker_carea(keel_depth, dz_val, LWratio=lw_ratio, volume_law=volume_law, area=area)
+                ice = self.barker_carea(keel_depth, dz_val, LWratio=lw_ratio, volume_law=volume_law, area=area, wall_slope=wall_slope)
                 
                 total_volume = (1/density_ratio) * np.nansum(ice.uwV,axis=0) #double check axis need rows, ~87% of ice underwater
                 sail_volume = total_volume - np.nansum(ice.uwV,axis=0) # sail volume is above water volune
@@ -1121,7 +1205,7 @@ class Iceberg:
                 if EC < self.STABILITY_THRESHOLD:
                     raise Exception("Still unstable, check W/H ratios")
 
-                ice = self._add_surface_area(ice, dz_val, rf)
+                ice = self._add_surface_area(ice, dz_val, rf, footprint_factor)
                 ice = self._assign_variable_attrs(ice)
                 return ice
 

@@ -49,6 +49,30 @@ def test_wettedA_and_roughness_present():
         assert ds.wettedA.attrs.get("units") == "m2", f"{name}: wettedA units wrong"
 
 
+def test_basalA_present_and_within_smooth_total():
+    """basalA is the keel bottom footprint: positive, roughness-free, and a
+    fraction of the smooth total area (wettedA / roughness = lateral + basalA)."""
+    for name, (length, area, _) in MEASURED_SA.items():
+        ds = _calibrated(length, area)
+        assert "basalA" in ds.variables, f"{name}: basalA missing"
+        smooth_total = float(ds.wettedA) / float(ds.roughness)
+        assert 0.0 < float(ds.basalA) < smooth_total, (
+            f"{name}: basalA {float(ds.basalA):.2e} not within smooth total {smooth_total:.2e}"
+        )
+
+
+def test_footprint_factor_uses_measured_area():
+    """footprint_factor = measured area/(L*W) when area is given, else 0.68."""
+    length, area, _ = MEASURED_SA["A_survey2"]
+    with_area = _calibrated(length, area)
+    expected = area / (length * (length / 1.62))
+    assert abs(float(with_area.footprint_factor) - expected) < 1e-9
+    # without measured area -> default FOOTPRINT_SHAPE_FACTOR
+    no_area = Iceberg(length=length, dz=5).init_iceberg_size(
+        keel_method="schild", volume_law="sulak")
+    assert abs(float(no_area.footprint_factor) - 0.68) < 1e-9
+
+
 def test_roughness_factor_scales_area_linearly():
     """wettedA scales linearly with the roughness factor; 1.0 gives the smooth area."""
     length, area, _ = MEASURED_SA["A_survey2"]
