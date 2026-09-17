@@ -1,17 +1,5 @@
 """Check the polygon footprint helpers against analytic shapes.
 
-``footprint_metrics`` measures length, area and perimeter on ONE convention:
-length is the convex-hull max caliper (Schild's "surface length" -- hull
-calipers of the four 2017 drone clouds give 738/740/528/528 m against the
-published 733/729/518/515 m), area is the raw polygon area, and perimeter is
-measured after simplification at a fixed tolerance. The shape factors are
-therefore defined against the *caliper* bounding rectangle, so a circle gives
-pi/4 = 0.785 for both, not 1.0.
-
-The key asymmetry under test: smoothing leaves area alone but shortens
-perimeter. That is why the tolerance is part of the measurement rather than a
-detail -- a raw segmented perimeter double-counts the roughness factor.
-
 Run standalone (no pytest needed):  python tests/test_footprint.py
 """
 
