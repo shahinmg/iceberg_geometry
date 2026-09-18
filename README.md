@@ -1,4 +1,5 @@
 # iceberg-geometry
+![CI](https://github.com/shahinmg/iceberg_geometry/actions/workflows/ci.yml/badge.svg)
 
 A Python model for **iceberg geometry**.
 

@@ -28,11 +28,7 @@ Key References:
 import warnings
 import numpy as np
 import numpy.matlib
-from scipy.interpolate import interp1d, interp2d
-from scipy.spatial import cKDTree, KDTree
 import xarray as xr
-from math import ceil
-from sklearn.linear_model import LinearRegression
 from importlib.metadata import version, PackageNotFoundError
 
 # Import constants module
@@ -657,7 +653,7 @@ class Iceberg:
         else:
             dz = float(dz)
         
-        if keel_depth == None:
+        if keel_depth is None:
             keel_depth = self.keeldepth(L,'barker') # K = keeldepth(L,'mean');
             dz = 10
             LWratio = 1.62
@@ -809,7 +805,7 @@ class Iceberg:
         widths = length_layers.values / LWratio 
         width_layers = xr.DataArray(data = widths, coords = {"Z":z_coord_flat},  dims=["Z","X"], name="uwW")
         
-        dznew = dz * np.ones(length_layers.values.shape);
+        dznew = dz * np.ones(length_layers.values.shape)
         
         vol = dznew * length_layers.values * width_layers.values
         volume = xr.DataArray(data=vol, coords = {"Z":z_coord_flat},  dims=["Z","X"], name="uwV")
@@ -1116,8 +1112,8 @@ class Iceberg:
                 deepest_keel = np.ceil(keel_depth/dz_val) # index of deepest iceberg layer, % ice.keeli = round(K./dz)
                 # dz = dzS
                 dzk = -1*((deepest_keel - 1) * dz_val - keel_depth) #
-                stability = waterline_width/thickness
-                
+                stability = waterline_width/thickness[0]
+
                 ice['totalV'] = xr.DataArray(data=total_volume[0],name='totalV')
                 ice['sailV'] = xr.DataArray(data=sail_volume[0], name='sailV')
                 ice['W'] = xr.DataArray(waterline_width, name='W')
@@ -1128,15 +1124,18 @@ class Iceberg:
                 ice['keeli'] = xr.DataArray(data=deepest_keel, name='keeli')
                 ice['dz'] = xr.DataArray(data=dz_val, name='dz')
                 ice['dzk'] = xr.DataArray(data=dzk, name='dzk')
-                
+
+                if stability < self.STABILITY_THRESHOLD:
+                    raise Exception("Still unstable, check W/H ratios")
+
                 pf = self._resolve_perimeter_factor(perimeter, self.length, waterline_width)
                 ice = self._add_surface_area(ice, dz_val, rf, ff_effective, pf)
                 ice = self._assign_variable_attrs(ice)
                 return ice
-            
+
             elif stability_method == 'equal':
                 # change W to equal L, recalculate volumes
-                if quiet == False:
+                if not quiet:
                     print(f'Fixing width to equal L, for L = {self.length} m size class')
                 # use L:W ratio of to make stable, set so L:W makes EC=EC_thresh
                 
