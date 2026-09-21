@@ -122,8 +122,9 @@ class Iceberg:
         "uwV": {
             "long_name": "Underwater layer volume",
             "units": "m3",
-            "description": "Volume of the iceberg contained in each depth layer "
-                           "(length * width * layer thickness).",
+            "description": "Volume of the iceberg contained in each depth layer. The "
+                           "exact formula depends on volume_law -- see the "
+                           "'computation' attribute on this variable.",
         },
         # Scalar summary variables added by init_iceberg_size()
         "totalV": {
@@ -824,6 +825,14 @@ class Iceberg:
         # relation (Sulak et al. 2017 / Schild et al. 2021)
         ff_proxy = self._resolve_footprint_factor(footprint_factor, area)
 
+        # How uwV was actually produced, recorded per-berg on the variable itself.
+        # Stored under 'computation' rather than 'description' so the static
+        # VARIABLE_ATTRS update in _assign_variable_attrs cannot clobber it.
+        uwV_computation = (
+            "dz * uwL * uwW -- uncalibrated rectangular prism, no volume_law "
+            "applied. pass volume_law='sulak' "
+            "to calibrate against V = c*A^x.")
+
         if volume_law == 'sulak':
             L_wl = float(np.asarray(L).ravel()[0])
             W_wl = L_wl / LWratio
@@ -864,6 +873,11 @@ class Iceberg:
                 tot = float(np.nansum(icebergs['uwV'].values))
                 if tot > 0:
                     icebergs['uwV'] = icebergs['uwV'] * (V_uw_target / tot)
+                uwV_computation = (
+                    f"shape_factor * dz * uwL * uwW (shape_factor = "
+                    f"{shape_factor:.4f}), rescaled so nansum(uwV) = c*A^x. The "
+                    f"uwL/uwW taper is set by wall_slope, not by the volume, so uwV "
+                    f"is NOT recoverable from dz*uwL*uwW.")
                 icebergs.attrs['volume_law'] = (
                     f"V=c*A^x (c={const.AREA_VOLUME_COEFFICIENT}, "
                     f"x={const.AREA_VOLUME_EXPONENT}, Sulak 2017/Schild 2021); "
@@ -904,6 +918,10 @@ class Iceberg:
                         f"[0.33, 1.00]. nansum(uwV) is {achieved:.2f} x the "
                         f"calibrated target. {hint}",
                         stacklevel=3)
+                uwV_computation = (
+                    f"shape_factor * dz * uwL * uwW (shape_factor = "
+                    f"{shape_factor:.4f}), uwL/uwW already tapered. Recoverable as "
+                    f"footprint_factor * dz * uwL * uwW.")
                 icebergs.attrs['volume_law'] = (
                     f"V=c*A^x (c={const.AREA_VOLUME_COEFFICIENT}, "
                     f"x={const.AREA_VOLUME_EXPONENT}, Sulak 2017/Schild 2021); "
@@ -916,6 +934,7 @@ class Iceberg:
                 f"Unknown volume_law {volume_law!r}; expected 'sulak' or None.")
 
         icebergs = self._assign_variable_attrs(icebergs)
+        icebergs['uwV'].attrs['computation'] = uwV_computation
         icebergs = self._assign_global_attrs(icebergs)
         return icebergs
 
@@ -1057,8 +1076,7 @@ class Iceberg:
 
         # Effective waterline footprint fill fraction (real footprint / L*W). Uses
         # the MEASURED `area` when supplied (area / (L*W)), otherwise the caller's
-        # `footprint_factor` or the FOOTPRINT_SHAPE_FACTOR default. Multiply basalA
-        # (or any bounding-box plan area) by this to get the rounded plan footprint.
+        # `footprint_factor` or the FOOTPRINT_SHAPE_FACTOR default.
         _W_wl = self.length / lw_ratio_input
         ff_proxy = self._resolve_footprint_factor(footprint_factor, area)
         if area is not None:
