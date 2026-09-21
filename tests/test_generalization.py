@@ -6,17 +6,6 @@ not a test of prediction. These checks capture the cross-berg evidence that they
 actually transfer, so the finding lives in the repo rather than only in analysis
 notes:
 
-  * Keel: train the L:keel ratio on ONE berg, predict the OTHER -> within ~7%.
-  * Roughness: the measured drone enhancement at ~1 m scale is nearly identical
-    across bergs (A 1.19, B 1.17), so the single documented factor is
-    representative -- though it stays OPT-IN rather than the shipped default,
-    since a 1 m-scale enhancement from three bergs is not justification enough
-    to apply to whole-dataframe sweeps.
-
-Reference numbers are from Schild et al. (2021) Table 1 (lengths, keels) and from
-the drone-cloud roughness measurement in this repo (3-D area / plan area at 1 m
-grid). The roughness values are hard-coded so the test needs no point-cloud data.
-
 Run standalone (no pytest needed):  python tests/test_generalization.py
 """
 
