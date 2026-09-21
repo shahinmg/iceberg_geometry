@@ -105,8 +105,9 @@ class Iceberg:
         "cross_area": {
             "long_name": "Underwater cross-sectional area",
             "units": "m2",
-            "description": "Horizontal cross-sectional area of the iceberg at each depth "
-                           "layer (Barker et al. 2004 for keel <= 200 m; tabular below).",
+            "description": "Vertical cross-section along the long axis: uwL * dz "
+                           "(Barker et al. 2004 for keel <= 200 m; tabular below). "
+                           "Bounding-box section -- no footprint fill fraction.",
         },
         "uwL": {
             "long_name": "Underwater length",
