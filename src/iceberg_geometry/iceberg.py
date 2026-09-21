@@ -105,8 +105,9 @@ class Iceberg:
         "cross_area": {
             "long_name": "Underwater cross-sectional area",
             "units": "m2",
-            "description": "Horizontal cross-sectional area of the iceberg at each depth "
-                           "layer (Barker et al. 2004 for keel <= 200 m; tabular below).",
+            "description": "Vertical cross-section along the long axis: uwL * dz "
+                           "(Barker et al. 2004 for keel <= 200 m; tabular below). "
+                           "Bounding-box section -- no footprint fill fraction.",
         },
         "uwL": {
             "long_name": "Underwater length",
@@ -122,8 +123,9 @@ class Iceberg:
         "uwV": {
             "long_name": "Underwater layer volume",
             "units": "m3",
-            "description": "Volume of the iceberg contained in each depth layer "
-                           "(length * width * layer thickness).",
+            "description": "Volume of the iceberg contained in each depth layer. The "
+                           "exact formula depends on volume_law -- see the "
+                           "'computation' attribute on this variable.",
         },
         # Scalar summary variables added by init_iceberg_size()
         "totalV": {
@@ -824,14 +826,19 @@ class Iceberg:
         # relation (Sulak et al. 2017 / Schild et al. 2021)
         ff_proxy = self._resolve_footprint_factor(footprint_factor, area)
 
+        # How uwV was actually produced, recorded per-berg on the variable itself.
+        # Stored under 'computation' rather than 'description' so the static
+        # VARIABLE_ATTRS update in _assign_variable_attrs cannot clobber it.
+        uwV_computation = (
+            "dz * uwL * uwW -- uncalibrated rectangular prism, no volume_law "
+            "applied. pass volume_law='sulak' "
+            "to calibrate against V = c*A^x.")
+
         if volume_law == 'sulak':
             L_wl = float(np.asarray(L).ravel()[0])
             W_wl = L_wl / LWratio
             kd = float(np.asarray(keel_depth).ravel()[0])
-            # Waterline footprint area A fed into Sulak's V = c*A^x. If a measured
-            # (segmented) polygon area is supplied, use it directly -- that is
-            # exactly Sulak et al.'s input. Otherwise fall back to estimating it
-            # from length via the rounded-rectangle footprint_factor.
+            # Waterline footprint area A fed into Sulak's V = c*A^x.
             if area is not None:
                 A_wl = float(area)
                 if A_wl <= 0:
@@ -862,9 +869,16 @@ class Iceberg:
                 icebergs['uwW'] = icebergs['uwW'] * taperW
                 icebergs['cross_area'] = icebergs['cross_area'] * taperL
                 icebergs['uwV'] = icebergs['uwV'] * shape_factor * taperL * taperW
+                # icebergs['uwV'] = icebergs['uwV'] * taperL * taperW
+
                 tot = float(np.nansum(icebergs['uwV'].values))
                 if tot > 0:
                     icebergs['uwV'] = icebergs['uwV'] * (V_uw_target / tot)
+                uwV_computation = (
+                    f"shape_factor * dz * uwL * uwW (shape_factor = "
+                    f"{shape_factor:.4f}), rescaled so nansum(uwV) = c*A^x. The "
+                    f"uwL/uwW taper is set by wall_slope, not by the volume, so uwV "
+                    f"is NOT recoverable from dz*uwL*uwW.")
                 icebergs.attrs['volume_law'] = (
                     f"V=c*A^x (c={const.AREA_VOLUME_COEFFICIENT}, "
                     f"x={const.AREA_VOLUME_EXPONENT}, Sulak 2017/Schild 2021); "
@@ -874,7 +888,8 @@ class Iceberg:
             elif prism > 0:
                 # solve 1 - a + a^2/3 = target/prism for the linear-taper param a,
                 # where cross-section width scales (1 - a*z/keel), a in [0, 1]
-                g = min(1.0, max(1.0 / 3.0, V_uw_target / prism))
+                g_req = V_uw_target / prism
+                g = min(1.0, max(1.0 / 3.0, g_req))
                 a = 1.5 * (1.0 - np.sqrt(max(0.0, 1.0 - (4.0 / 3.0) * (1.0 - g))))
                 z = icebergs['Z'].values.astype(float)
                 taper = np.clip(1.0 - a * z / kd, 1.0 - a, 1.0)[:, None]
@@ -883,16 +898,44 @@ class Iceberg:
                 icebergs['cross_area'] = icebergs['cross_area'] * taper
                 icebergs['uwV'] = (icebergs['uwV'] * shape_factor
                                    * taper ** 2)
+                # A linear taper spans only [1/3, 1] of the prism volume: a=0 is a
+                # straight-sided box, a=1 a pyramid pinched to zero at the keel. 
+                achieved = float(np.nansum(icebergs['uwV'].values)) / V_uw_target
+                saturated = g_req > 1.0 or g_req < 1.0 / 3.0
+                if saturated:
+                    end = ("a=0 (no taper, straight walls)" if g_req > 1.0
+                           else "a=1 (pyramid, keel pinched to a point)")
+                    hint = ("The keel is too shallow to hold c*A^x; small bergs "
+                            "(L < ~150 m with keel_method='barker') hit this end "
+                            "stop, and raising footprint_factor makes it worse "
+                            "(target grows as ff^x, prism only as ff)."
+                            if g_req > 1.0 else
+                            "The keel is too deep for c*A^x; near-equant bergs hit "
+                            "this end stop.")
+                    warnings.warn(
+                        f"taper solve saturated at {end} for L={L_wl:.0f} m, "
+                        f"keel={kd:.0f} m: V=c*A^x wants {g_req:.2f} x the rounded "
+                        f"L x W prism volume, but a linear taper only spans "
+                        f"[0.33, 1.00]. nansum(uwV) is {achieved:.2f} x the "
+                        f"calibrated target. {hint}",
+                        stacklevel=3)
+                uwV_computation = (
+                    f"shape_factor * dz * uwL * uwW (shape_factor = "
+                    f"{shape_factor:.4f}), uwL/uwW already tapered. Recoverable as "
+                    f"footprint_factor * dz * uwL * uwW.")
                 icebergs.attrs['volume_law'] = (
                     f"V=c*A^x (c={const.AREA_VOLUME_COEFFICIENT}, "
                     f"x={const.AREA_VOLUME_EXPONENT}, Sulak 2017/Schild 2021); "
                     f"A={a_src} "
-                    f"({A_wl:.0f} m^2); linear keel taper to {1.0 - a:.2f} of waterline")
+                    f"({A_wl:.0f} m^2); linear keel taper to {1.0 - a:.2f} of waterline"
+                    + (f"; TAPER SATURATED, uwV is {achieved:.2f} x the c*A^x target"
+                       if saturated else ""))
         elif volume_law is not None:
             raise ValueError(
                 f"Unknown volume_law {volume_law!r}; expected 'sulak' or None.")
 
         icebergs = self._assign_variable_attrs(icebergs)
+        icebergs['uwV'].attrs['computation'] = uwV_computation
         icebergs = self._assign_global_attrs(icebergs)
         return icebergs
 
@@ -1034,8 +1077,7 @@ class Iceberg:
 
         # Effective waterline footprint fill fraction (real footprint / L*W). Uses
         # the MEASURED `area` when supplied (area / (L*W)), otherwise the caller's
-        # `footprint_factor` or the FOOTPRINT_SHAPE_FACTOR default. Multiply basalA
-        # (or any bounding-box plan area) by this to get the rounded plan footprint.
+        # `footprint_factor` or the FOOTPRINT_SHAPE_FACTOR default.
         _W_wl = self.length / lw_ratio_input
         ff_proxy = self._resolve_footprint_factor(footprint_factor, area)
         if area is not None:
