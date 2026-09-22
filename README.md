@@ -11,7 +11,7 @@ deep-keeled Sermilik Fjord icebergs from Schild et al. (2021) and Sulak et al.
 
 ## Installation
 
-Clone the repo and install in editable mode (so code edits take effect immediately):
+Clone the repo and install in editable mode:
 
 ```bash
 git clone https://github.com/shahinmg/iceberg_geometry.git
