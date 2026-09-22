@@ -4,7 +4,10 @@ Run standalone (no pytest needed):  python tests/test_volume_calibration.py
 Or, if pytest is installed:          pytest tests/test_volume_calibration.py
 """
 
+import warnings
+
 from iceberg_geometry import Iceberg
+import iceberg_geometry.constants as const
 
 # name -> (surface_length_m, keel_depth_m, waterline_footprint_area_m2, V_total_m3)
 # length / keel / V_total: Schild et al. 2021, Table 1.
@@ -81,6 +84,76 @@ def test_totalV_equals_uwV_plus_sailV():
     total = float(ds.totalV.values)
     parts = float(ds.uwV.sum().values) + float(ds.sailV.values)
     assert abs(total / parts - 1.0) < 1e-6, f"totalV {total:.3e} != uwV+sailV {parts:.3e}"
+
+
+def test_measured_area_hits_sulak_volume_exactly():
+    """With a measured `area`, totalV IS c*A^x -- not an approximation to it.
+
+    The taper is solved on the discrete Z grid, so the calibrated volume must be
+    exact and independent of dz. Solving the continuous closed form instead left a
+    quadrature deficit (-4% at dz=20, -0.8% at dz=5) that silently biased every run.
+    """
+    c, x = const.AREA_VOLUME_COEFFICIENT, const.AREA_VOLUME_EXPONENT
+    for name, (length, _, area, _) in MEASURED.items():
+        for dz in (20, 10, 5, 2, 1):
+            ds = Iceberg(length=length, dz=dz).init_iceberg_size(
+                keel_method="schild", volume_law="sulak", area=area
+            )
+            ratio = float(ds.totalV.values) / (c * area ** x)
+            assert abs(ratio - 1.0) < 1e-9, (
+                f"{name} dz={dz}: totalV is {ratio:.6f} x c*A^x, not exact")
+
+
+def test_unsaturated_bergs_are_not_flagged():
+    """Bergs the taper can actually solve hit c*A^x exactly and warn about nothing.
+
+    L=250/300 m used to overshoot the target by 0.7-1.7% while the continuous
+    saturation test said they were fine.
+    """
+    c, x = const.AREA_VOLUME_COEFFICIENT, const.AREA_VOLUME_EXPONENT
+    for length in (200, 250, 300, 400, 733):
+        area = 0.65 * length * (length / const.DEFAULT_LENGTH_TO_WIDTH_RATIO)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            ds = Iceberg(length=length, dz=5).init_iceberg_size(
+                keel_method="schild", volume_law="sulak", area=area
+            )
+        saturated = [w for w in caught if "taper solve saturated" in str(w.message)]
+        ratio = float(ds.totalV.values) / (c * area ** x)
+        assert not saturated, f"L={length}: spurious saturation warning at ratio {ratio:.4f}"
+        assert abs(ratio - 1.0) < 1e-9, f"L={length}: totalV is {ratio:.6f} x c*A^x"
+
+
+def test_saturated_bergs_still_warn():
+    """The end stops are real: a keel too shallow for c*A^x must still warn."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        Iceberg(length=50, dz=5).init_iceberg_size(
+            keel_method="schild", volume_law="sulak",
+            area=0.65 * 50 * (50 / const.DEFAULT_LENGTH_TO_WIDTH_RATIO),
+        )
+    assert any("taper solve saturated" in str(w.message) for w in caught), \
+        "L=50 m cannot reach c*A^x and must warn"
+
+
+def test_measured_area_ignores_footprint_default():
+    """A measured `area` fully overrides the point-cloud FOOTPRINT_SHAPE_FACTOR.
+
+    Guards the strict-Sulak path: nothing derived from the Schild point clouds may
+    move the volume once the caller supplies their own footprint area.
+    """
+    c, x = const.AREA_VOLUME_COEFFICIENT, const.AREA_VOLUME_EXPONENT
+    area = 2.20e5
+    v = float(_calibrated(733, area).totalV.values)
+    assert abs(v / (c * area ** x) - 1.0) < 1e-9
+    # area and footprint_factor are mutually exclusive, so they cannot be mixed
+    try:
+        Iceberg(length=733, dz=5).init_iceberg_size(
+            keel_method="schild", volume_law="sulak", area=area, footprint_factor=0.65)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("area + footprint_factor together should raise ValueError")
 
 
 if __name__ == "__main__":

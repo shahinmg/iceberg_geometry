@@ -886,38 +886,58 @@ class Iceberg:
                     f"({A_wl:.0f} m^2); surface geometry from wall_slope={wall_slope} deg "
                     f"undercut (Schild 2024), uwV scaled to preserve calibrated volume")
             elif prism > 0:
-                # solve 1 - a + a^2/3 = target/prism for the linear-taper param a,
-                # where cross-section width scales (1 - a*z/keel), a in [0, 1]
+                # Solve for the linear-taper param a (cross-section scales
+                # 1 - a*z/keel, a in [0, 1]) so nansum(uwV) lands on c*A^x.
                 g_req = V_uw_target / prism
-                g = min(1.0, max(1.0 / 3.0, g_req))
-                a = 1.5 * (1.0 - np.sqrt(max(0.0, 1.0 - (4.0 / 3.0) * (1.0 - g))))
                 z = icebergs['Z'].values.astype(float)
+                base = shape_factor * icebergs['uwV'].values
+
+                def _tapered_volume(a_try):
+                    t = np.clip(1.0 - a_try * z / kd, 1.0 - a_try, 1.0)[:, None]
+                    return float(np.nansum(base * t ** 2))
+
+                # monotone decreasing in a: v_lo (straight walls) >= v_hi (pyramid)
+                v_lo, v_hi = _tapered_volume(0.0), _tapered_volume(1.0)
+                if v_lo <= V_uw_target:
+                    a = 0.0        # even straight walls cannot hold c*A^x
+                elif v_hi >= V_uw_target:
+                    a = 1.0        # even a keel pinched to a point overshoots
+                else:
+                    lo, hi = 0.0, 1.0
+                    for _ in range(60):
+                        mid = 0.5 * (lo + hi)
+                        if _tapered_volume(mid) > V_uw_target:
+                            lo = mid
+                        else:
+                            hi = mid
+                    a = 0.5 * (lo + hi)
                 taper = np.clip(1.0 - a * z / kd, 1.0 - a, 1.0)[:, None]
                 icebergs['uwL'] = icebergs['uwL'] * taper
                 icebergs['uwW'] = icebergs['uwW'] * taper
                 icebergs['cross_area'] = icebergs['cross_area'] * taper
                 icebergs['uwV'] = (icebergs['uwV'] * shape_factor
                                    * taper ** 2)
-                # A linear taper spans only [1/3, 1] of the prism volume: a=0 is a
-                # straight-sided box, a=1 a pyramid pinched to zero at the keel. 
+                # A linear taper spans only [v_hi, v_lo] of the prism volume: a=0 is a
+                # straight-sided box, a=1 a pyramid pinched to zero at the keel.
                 achieved = float(np.nansum(icebergs['uwV'].values)) / V_uw_target
-                saturated = g_req > 1.0 or g_req < 1.0 / 3.0
+                undershoot = v_lo < V_uw_target
+                saturated = undershoot or v_hi > V_uw_target
                 if saturated:
-                    end = ("a=0 (no taper, straight walls)" if g_req > 1.0
+                    end = ("a=0 (no taper, straight walls)" if undershoot
                            else "a=1 (pyramid, keel pinched to a point)")
                     hint = ("The keel is too shallow to hold c*A^x; small bergs "
                             "(L < ~150 m with keel_method='barker') hit this end "
                             "stop, and raising footprint_factor makes it worse "
                             "(target grows as ff^x, prism only as ff)."
-                            if g_req > 1.0 else
+                            if undershoot else
                             "The keel is too deep for c*A^x; near-equant bergs hit "
                             "this end stop.")
                     warnings.warn(
                         f"taper solve saturated at {end} for L={L_wl:.0f} m, "
                         f"keel={kd:.0f} m: V=c*A^x wants {g_req:.2f} x the rounded "
                         f"L x W prism volume, but a linear taper only spans "
-                        f"[0.33, 1.00]. nansum(uwV) is {achieved:.2f} x the "
-                        f"calibrated target. {hint}",
+                        f"[{v_hi / v_lo:.2f}, 1.00]. nansum(uwV) is {achieved:.2f} x "
+                        f"the calibrated target. {hint}",
                         stacklevel=3)
                 uwV_computation = (
                     f"shape_factor * dz * uwL * uwW (shape_factor = "
