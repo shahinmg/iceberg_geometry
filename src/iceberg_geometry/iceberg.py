@@ -208,6 +208,19 @@ class Iceberg:
             "units": "m",
             "description": "Thickness of the partial layer at the keel.",
         },
+        "maxTH": {
+            "long_name": "Total thickness cap",
+            "units": "m",
+            "description": "Upper bound imposed on TH, normally the thickness of the "
+                           "glacier the iceberg calved from. NaN when no cap was "
+                           "requested (max_thickness=None).",
+        },
+        "keel_capped": {
+            "long_name": "Keel capped flag",
+            "units": "1",
+            "description": "1 if the keel was shortened to keep TH <= maxTH, 0 if the "
+                           "empirical keel depth already fit (or no cap was requested).",
+        },
     }
 
     def _wetted_surface_area(self, ice, dz, perimeter_factor=1.0): # might remove 
@@ -264,8 +277,134 @@ class Iceberg:
                 f"footprint_factor must be in (0, 1], got {footprint_factor}")
         return ff
 
+    def _keel_cap_for_thickness(self, max_thickness, A_wl, dz, lw_ratio,
+                                volume_law=None, area=None, wall_slope=None,
+                                footprint_factor=None):
+        """Deepest keel whose total thickness ``TH = keel + freeB`` fits under a cap.
+
+        An iceberg cannot be thicker than the ice it calved from, and the
+        waterline is a measured input, so the keel is the only lever.
+
+        Under ``volume_law='sulak'`` this is a closed form: submerged volume is
+        pinned to V = c*A^x rather than integrated from the keel, so the sail
+        volume -- and therefore the freeboard -- does not depend on keel depth
+        at all::
+
+            freeB = (1 - rho) * c * A^x / A = (1 - rho) * c * A^(x-1)
+
+        and the cap lands TH exactly on ``max_thickness``. On the uncalibrated
+        prism path freeboard does grow with the keel, so TH(K) is solved by
+        fixed-point iteration (a strong contraction, |dg/dK| ~ 0.12, so it
+        converges in two or three passes).
+
+        Parameters
+        ----------
+        max_thickness : float
+            Upper bound on total thickness in meters, e.g. the thickness of the
+            glacier terminus the iceberg calved from.
+        A_wl : float
+            Waterline footprint area used to convert sail volume to freeboard.
+        dz, lw_ratio, volume_law, area, wall_slope, footprint_factor
+            Passed through to :meth:`barker_carea` on the iterative path.
+
+        Returns
+        -------
+        float
+            Deepest keel depth in meters consistent with the cap.
+
+        Raises
+        ------
+        ValueError
+            If ``max_thickness`` is not positive, or is too small to float a
+            berg of this waterline footprint at any keel depth.
+        """
+        max_thickness = float(max_thickness)
+        if max_thickness <= 0:
+            raise ValueError(f"max_thickness must be positive, got {max_thickness}")
+
+        rho = const.DENSITY_RATIO_ICE_TO_WATER
+
+        if volume_law == 'sulak':
+            freeB = ((1.0 - rho) * const.AREA_VOLUME_COEFFICIENT
+                     * A_wl ** (const.AREA_VOLUME_EXPONENT - 1.0))
+            if max_thickness <= freeB:
+                raise ValueError(
+                    f"max_thickness={max_thickness:.0f} m is below the freeboard "
+                    f"{freeB:.0f} m that a {A_wl:.0f} m^2 waterline footprint floats "
+                    "at under V=c*A^x, so no keel depth satisfies the cap. Either the "
+                    "footprint area or the thickness is wrong for this iceberg.")
+            return max_thickness - freeB
+
+        # Uncalibrated prism: freeboard grows with the keel, so iterate on
+        # K <- max_thickness - freeB(K), keeping the deepest keel that fits.
+        def _thickness(K):
+            probe = self.barker_carea(
+                K, dz, LWratio=lw_ratio, volume_law=volume_law, area=area,
+                wall_slope=wall_slope, footprint_factor=footprint_factor)
+            V_uw = float(np.nansum(probe['uwV'].values))
+            return K + (1.0 / rho - 1.0) * V_uw / A_wl
+
+        deepest_fitting = None
+        K = rho * max_thickness
+        for _ in range(10):
+            if K <= 0:
+                break
+            th = _thickness(K)
+            if th <= max_thickness and (deepest_fitting is None or K > deepest_fitting):
+                deepest_fitting = K
+            if abs(th - max_thickness) < dz / 100.0:
+                break
+            K = K + (max_thickness - th)
+
+        if deepest_fitting is None:
+            raise ValueError(
+                f"no keel depth gives a total thickness <= max_thickness="
+                f"{max_thickness:.0f} m for L={self.length:.0f} m on the "
+                "uncalibrated prism path (volume_law=None).")
+        return deepest_fitting
+
+    def _apply_thickness_cap(self, keel_depth, max_thickness, A_wl, dz, lw_ratio,
+                             volume_law=None, area=None, wall_slope=None,
+                             footprint_factor=None):
+        """Clamp ``keel_depth`` so total thickness stays under ``max_thickness``.
+
+        Returns ``(keel_depth, was_capped)``. A no-op when the empirical keel
+        already fits.
+        """
+        keel_depth = float(np.asarray(keel_depth).ravel()[0])
+        cap = self._keel_cap_for_thickness(
+            max_thickness, A_wl, dz, lw_ratio, volume_law=volume_law, area=area,
+            wall_slope=wall_slope, footprint_factor=footprint_factor)
+        if keel_depth <= cap:
+            return keel_depth, False
+        warnings.warn(
+            f"keel capped {keel_depth:.0f} -> {cap:.0f} m for L={self.length:.0f} m so "
+            f"total thickness stays within max_thickness={float(max_thickness):.0f} m "
+            "(an iceberg cannot be thicker than the ice it calved from).",
+            stacklevel=3)
+        return cap, True
+
     @staticmethod
-    def _resolve_perimeter_factor(perimeter, length, width): # might remove 
+    def _assign_thickness_cap(ice, max_thickness, keel_capped, keel_uncapped):
+        """Record the thickness cap and whether it bound, on the output dataset.
+
+        ``maxTH`` and ``keel_capped`` are always present so that datasets from a
+        sweep concatenate with a stable schema.
+        """
+        ice['maxTH'] = xr.DataArray(
+            data=np.nan if max_thickness is None else float(max_thickness), name='maxTH')
+        ice['keel_capped'] = xr.DataArray(
+            data=1.0 if keel_capped else 0.0, name='keel_capped')
+        if max_thickness is not None:
+            ice.attrs['thickness_cap'] = (
+                f"max_thickness={float(max_thickness):.0f} m; empirical keel "
+                f"{float(keel_uncapped):.0f} m "
+                + (f"CAPPED to {float(ice['keel']):.0f} m" if keel_capped
+                   else "kept (already within the cap)"))
+        return ice
+
+    @staticmethod
+    def _resolve_perimeter_factor(perimeter, length, width): # might remove
         """Resolve the waterline perimeter shape factor from a measured perimeter.
 
         """
@@ -927,8 +1066,10 @@ class Iceberg:
                            else "a=1 (pyramid, keel pinched to a point)")
                     hint = ("The keel is too shallow to hold c*A^x; small bergs "
                             "(L < ~150 m with keel_method='barker') hit this end "
-                            "stop, and raising footprint_factor makes it worse "
-                            "(target grows as ff^x, prism only as ff)."
+                            "stop, raising footprint_factor makes it worse "
+                            "(target grows as ff^x, prism only as ff), and a "
+                            "max_thickness cap below the volume law's mean "
+                            "thickness c*A^(x-1) forces it."
                             if undershoot else
                             "The keel is too deep for c*A^x; near-equant bergs hit "
                             "this end stop.")
@@ -962,7 +1103,8 @@ class Iceberg:
     def init_iceberg_size(self, stability_method='equal', quiet=True,
                           keel_method='barker', volume_law=None, area=None,
                           width=None, roughness_factor=None, wall_slope=None,
-                          footprint_factor=None, perimeter=None):
+                          footprint_factor=None, perimeter=None,
+                          max_thickness=None):
         """
         Initialize complete iceberg geometry and ensure hydrostatic stability.
         
@@ -1001,6 +1143,17 @@ class Iceberg:
         perimeter : float, optional
             Measured waterline outline perimeter (m, e.g. a segmented polygon's
             ``geom.length``). Sets ``perimeter_factor = perimeter / (2*(L+W))``
+        max_thickness : float, optional
+            Upper bound on total thickness ``TH = keel + freeB`` (m), normally
+            the thickness of the glacier terminus the iceberg calved from --
+            the empirical keel laws are unbounded power laws of length and will
+            otherwise produce bergs thicker than their source glacier. The keel
+            is shortened to honour it; the waterline is a measured input and is
+            never changed. Under ``volume_law='sulak'`` the cap is free (volume
+            still lands on c*A^x) as long as ``max_thickness`` exceeds the mean
+            thickness that law implies, ``c * A^(x-1)``; below that the taper
+            solve saturates at straight walls and volume falls short of the
+            target, which is warned about. Default None (no cap).
 
 
 
@@ -1076,6 +1229,9 @@ class Iceberg:
             if wall_slope < 0:
                 raise ValueError(f"wall_slope must be >= 0 degrees, got {wall_slope}")
 
+        if max_thickness is not None and max_thickness <= 0:
+            raise ValueError(f"max_thickness must be positive, got {max_thickness}")
+
         # Waterline width: use the observed width if given, otherwise the
         # Dowdeswell default L:W ratio. Width does not affect the calibrated
         # total volume (area-driven)
@@ -1114,7 +1270,18 @@ class Iceberg:
             return self.length * width
 
         keel_depth = self.keeldepth(method=keel_method)
-        
+        keel_uncapped = float(np.asarray(keel_depth).ravel()[0])
+
+        # The keel laws are unbounded power laws of length, so cap total thickness
+        # at the source glacier's: an iceberg cannot be thicker than the ice it
+        # calved from. The waterline is a measured input, so the keel is the lever.
+        keel_capped = False
+        if max_thickness is not None:
+            keel_depth, keel_capped = self._apply_thickness_cap(
+                keel_depth, max_thickness, _footprint_area(_W_wl), dz_val,
+                lw_ratio_input, volume_law=volume_law, area=area,
+                wall_slope=wall_slope, footprint_factor=footprint_factor)
+
         # now get underwater shape, based on Barker for K<200, tabular for K>200, and
         ice = self.barker_carea(keel_depth, dz_val, LWratio=lw_ratio_input, volume_law=volume_law, area=area, wall_slope=wall_slope, footprint_factor=footprint_factor) # this gives you uwL, uwW, uwV, uwM, and vector Z down to keel depth
 
@@ -1146,7 +1313,9 @@ class Iceberg:
                 ice['keeli'] = xr.DataArray(data=deepest_keel, name='keeli')
                 ice['dz'] = xr.DataArray(data=dz_val, name='dz')
                 ice['dzk'] = xr.DataArray(data=dzk, name='dzk')
-                
+                ice = self._assign_thickness_cap(ice, max_thickness, keel_capped,
+                                                 keel_uncapped)
+
                 pf = self._resolve_perimeter_factor(perimeter, self.length, waterline_width)
                 ice = self._add_surface_area(ice, dz_val, rf, ff_effective, pf)
                 ice = self._assign_variable_attrs(ice)
@@ -1186,6 +1355,9 @@ class Iceberg:
                 ice['keeli'] = xr.DataArray(data=deepest_keel, name='keeli')
                 ice['dz'] = xr.DataArray(data=dz_val, name='dz')
                 ice['dzk'] = xr.DataArray(data=dzk, name='dzk')
+                # keel_new only ever shortens the keel, so it cannot breach the cap
+                ice = self._assign_thickness_cap(ice, max_thickness, keel_capped,
+                                                 keel_uncapped)
 
                 if stability < self.STABILITY_THRESHOLD:
                     raise Exception("Still unstable, check W/H ratios")
@@ -1203,7 +1375,17 @@ class Iceberg:
                 
                 width_temporary = self.STABILITY_THRESHOLD * thickness[0]
                 lw_ratio = np.floor((100*self.length)/width_temporary)/100 # round down to hundredth place
-                
+
+                # Widening grows the waterline footprint so the
+                # thickness cap has to be re-derived before the geometry rebuild.
+                if max_thickness is not None:
+                    keel_depth, recapped = self._apply_thickness_cap(
+                        keel_depth, max_thickness,
+                        _footprint_area(self.length / lw_ratio), dz_val, lw_ratio,
+                        volume_law=volume_law, area=area, wall_slope=wall_slope,
+                        footprint_factor=footprint_factor)
+                    keel_capped = keel_capped or recapped
+
                 ice = self.barker_carea(keel_depth, dz_val, LWratio=lw_ratio, volume_law=volume_law, area=area, wall_slope=wall_slope, footprint_factor=footprint_factor)
                 
                 total_volume = (1/density_ratio) * np.nansum(ice.uwV,axis=0) #double check axis need rows, ~87% of ice underwater
@@ -1227,6 +1409,8 @@ class Iceberg:
                 ice['keeli'] = xr.DataArray(data=deepest_keel, name='keeli')
                 ice['dz'] = xr.DataArray(data=dz_val, name='dz')
                 ice['dzk'] = xr.DataArray(data=dzk, name='dzk')
+                ice = self._assign_thickness_cap(ice, max_thickness, keel_capped,
+                                                 keel_uncapped)
                 EC = ice.W/ice.TH
                 
                 if EC < self.STABILITY_THRESHOLD:

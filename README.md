@@ -57,6 +57,7 @@ and widens the iceberg if needed to keep it stable.
 | `totalV`, `sailV` | total and above-water (sail) volume | m³ |
 | `TH` | total thickness (keel + freeboard) | m |
 | `dz`, `dzk`, `keeli` | layer thickness, keel partial layer, deepest layer index | m, m, – |
+| `maxTH`, `keel_capped` | thickness cap applied (NaN if none) and whether it bound (1/0) | m, – |
 
 Save it like any xarray dataset:
 
@@ -75,6 +76,9 @@ ice.to_netcdf("iceberg.nc")
 | `'constant'` | `K = 0.7·L` | simple proportional |
 | `'schild'` | `K = L / 1.98` | Sermilik large-iceberg (~2:1); see below |
 | `'mean'` | average of the above | hybrid |
+
+All are unbounded power laws of length. Pass `max_thickness=` (the source
+glacier's thickness, m) to shorten the keel until `TH` fits under it.
 
 ## Sermilik calibration
 
